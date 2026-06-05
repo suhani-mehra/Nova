@@ -1,2 +1,2 @@
 # Nova
-# Learning Dashboard
+## Learning Dashboard
