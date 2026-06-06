@@ -1,3 +1,6 @@
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { faHandsClapping } from '@fortawesome/free-solid-svg-icons';
+
 /* ===================== Nova — employee views ===================== */
 const { useState:useStateE } = React;
 
@@ -109,7 +112,7 @@ function MyTeam(){
       h('div',{className:'card-title'},'Team Highlights'),
       h('div',{className:'highlights'},
         h('div',{className:'hl'},
-          h('div',{className:'ic',style:{background:'rgba(166,52,255,.1)'}}, Icons.clap({size:26,color:'#A634FF'})),
+          h('div',{className:'ic',style:{background:'rgba(166,52,255,.1)'}}, h(FontAwesomeIcon, {icon: faHandsClapping, style:{color: "rgb(167, 53, 255)"}})),
           h('div',null, h('div',{className:'big'},TM.highlights.congrats),
             h('div',{className:'lab'},'Congrats sent this week'))),
         h('div',{className:'hl'},
