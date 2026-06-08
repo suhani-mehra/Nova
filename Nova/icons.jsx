@@ -56,9 +56,36 @@ const TierGlyph = {
   bronze:   h('rect',{x:-9,y:-9,width:18,height:18,rx:3}),
   silver:   h('polygon',{points:'0,-11 9.5,-5.5 9.5,5.5 0,11 -9.5,5.5 -9.5,-5.5'}),
   gold:     h('path',{d:'M0,-12 L3.5,-3.7 12,-3.7 5.2,1.4 7.6,9.7 0,4.7 -7.6,9.7 -5.2,1.4 -12,-3.7 -3.5,-3.7 Z'}),
-  diamond:  h('path',{d:'M0,-11 L11,0 0,11 -11,0 Z'}),
+  diamond: h('path',{d:'M-11,-9 L11,-9 L16,-2 L0,13 L-16,-2 Z'}),
   platinum: h('path',{d:'M-11,-4 L-5,3 0,-7 5,3 11,-4 9,9 -9,9 Z'}),
 };
 function tierHexInner(tierKey){ return TierGlyph[tierKey]; }
 
-Object.assign(window, { h, Icons, Avatar, Hex, tierHexInner, TierGlyph });
+/* award ribbon badge — medallion + two solid fishtail ribbons (matches reference) */
+function Ribbon({color, glyph, size=44}){
+  const cx=24, cy=20;
+  const glyphs = {
+    star:    h('polygon',{points:'24,12 25.94,17.33 31.61,17.53 27.14,21.02 28.70,26.47 24,23.3 19.30,26.47 20.86,21.02 16.39,17.53 22.06,17.33', fill:color}),
+    crown:   h('g',null,
+      h('path',{d:'M16.4,24.6 L16.4,15 L20.2,18.6 L24,13 L27.8,18.6 L31.6,15 L31.6,24.6 Z', fill:color}),
+      h('line',{x1:17.6, y1:22.2, x2:30.4, y2:22.2, stroke:'#fff', strokeWidth:1.3})),
+    diamond: h('g',null,
+      h('path',{d:'M18,14.6 L30,14.6 L33,19 L24,28 L15,19 Z', fill:color}),
+      h('line',{x1:18, y1:18.4, x2:30, y2:18.4, stroke:'#fff', strokeWidth:1.1}),
+      h('line',{x1:24, y1:18.4, x2:24, y2:28, stroke:'#fff', strokeWidth:1.1})),
+  };
+  return h('div',{className:'ribbon', style:{width:size, height:size*58/48}},
+    h('svg',{viewBox:'0 0 48 58', width:size, height:size*58/48},
+      // ribbon tails (behind medallion)
+      h('polygon',{points:'21,31 15.5,32 9.5,51 13,47.5 16.8,52.5', fill:color}),
+      h('polygon',{points:'27,31 32.5,32 38.5,51 35,47.5 31.2,52.5', fill:color}),
+      h('line',{x1:18, y1:33, x2:12.5, y2:49.5, stroke:'#fff', strokeWidth:1, opacity:.45}),
+      h('line',{x1:30, y1:33, x2:35.5, y2:49.5, stroke:'#fff', strokeWidth:1, opacity:.45}),
+      // medallion
+      h('circle',{cx:cx, cy:cy, r:14.5, fill:'#fff', stroke:color, strokeWidth:2.4}),
+      glyphs[glyph] || glyphs.star
+    )
+  );
+}
+
+Object.assign(window, { h, Icons, Avatar, Hex, tierHexInner, TierGlyph, Ribbon });

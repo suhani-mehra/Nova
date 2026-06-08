@@ -179,6 +179,15 @@ body.glow-vivid{
 .next-tier{margin-top:14px;font-size:15px;color:var(--ink-soft);font-weight:600}
 .next-tier b{color:var(--sky)}
 
+/* ---------------- badges earned ---------------- */
+.tier-card{display:flex;align-items:stretch;gap:0}
+.tier-card .tier-main{flex:1 1 auto;min-width:0}
+.tier-card .badges{flex:0 0 auto;width:212px;border-left:1px solid var(--line);padding-left:26px;margin-left:30px;display:flex;flex-direction:column}
+.badges-title{font-size:17px;font-weight:800;letter-spacing:-.01em;margin:2px 0 16px}
+.badge-rows{display:flex;flex-direction:column;gap:6px}
+.badge-row{display:flex;gap:6px}
+.ribbon{display:grid;place-items:center}
+
 /* ---------------- streak ---------------- */
 .streak-card{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
 .flame{font-size:84px;line-height:1;filter:drop-shadow(0 10px 22px rgba(255,107,40,.4));margin:14px 0 6px}

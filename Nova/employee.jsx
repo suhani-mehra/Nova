@@ -38,16 +38,24 @@ function MyProgress(){
   const days=['M','T','W','T','F','S','S'];
   return h('div',{className:'page'},
     // Tier card
-    h('div',{className:'card', style:{marginBottom:22}},
-      h(DotsDeco,null),
-      h('div',{className:'card-title'},'Your Tier'),
-      h(TierTrack,{tiers:T, currentKey:E.currentTier}),
-      h('div',{className:'tier-progress'},
-        h(Hex,{color:'#f5b71e',glyph:tierHexInner('gold'),active:true,size:42}),
-        h('div',{className:'bar'}, h('i',{style:{width:E.tierProgress+'%'}})),
-        h(Hex,{color:'#2ACCFF',glyph:tierHexInner('diamond'),active:false,size:42})
+    h('div',{className:'card tier-card', style:{marginBottom:22}},
+      h('div',{className:'tier-main'},
+        h('div',{className:'card-title'},'Your Tier'),
+        h(TierTrack,{tiers:T, currentKey:E.currentTier}),
+        h('div',{className:'tier-progress'},
+          h(Hex,{color:'#f5b71e',glyph:tierHexInner('gold'),active:true,size:42}),
+          h('div',{className:'bar'}, h('i',{style:{width:E.tierProgress+'%'}})),
+          h(Hex,{color:'#2ACCFF',glyph:tierHexInner('diamond'),active:false,size:42})
+        ),
+        h('div',{className:'next-tier'},'Next tier: ', h('b',null,'Diamond'))
       ),
-      h('div',{className:'next-tier'},'Next tier: ', h('b',null,'Diamond'))
+      h('aside',{className:'badges'},
+        h('div',{className:'badges-title'},'Badges Earned'),
+        h('div',{className:'badge-rows'},
+          E.badges.map((g,gi)=>h('div',{className:'badge-row',key:gi},
+            Array.from({length:g.count}).map((_,i)=>
+              h(Ribbon,{key:i, color:g.color, glyph:g.glyph})))))
+      )
     ),
     // 3 cards
     h('div',{className:'grid cols-3'},

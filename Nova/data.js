@@ -38,6 +38,13 @@ window.NOVA = (function(){
       lastMonth:[58,82,66,52,60],
       delta:12,
     },
+    badges:[
+      {color:'#EC12F0', glyph:'crown',   count:2},
+      {color:'#2ACCFF', glyph:'diamond', count:1},
+      {color:'#F7B100', glyph:'star',    count:3},
+      {color:'#8C8C96', glyph:'star',    count:1},
+      {color:'#e08531', glyph:'star',    count:2},
+    ],
     continueCourse:{name:'React Advanced Patterns', cat:'frontend', status:'In Progress', progress:60, tile:['#A634FF','#5400DC']},
     recommended:{name:'AI Foundations', meta:'Based on your recent interests', tile:['#2ACCFF','#5400DC']},
   };
