@@ -3,7 +3,7 @@ core/config.py
 Centralised settings loaded from .env via pydantic-settings.
 Usage anywhere in the app:
     from core.config import settings
-    print(settings.database_url)
+    print(settings.fabric_server)
 """
 
 from functools import lru_cache
@@ -43,11 +43,10 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     openai_recommendation_cache_hours: int = 24
 
-    # ── Database ──────────────────────────────────────────────────────────────
-    database_url: str = "sqlite:///./nova.db"
-
-    # ── Classmate Data ────────────────────────────────────────────────────────
-    classmate_data_path: str = "./data/classmate"
+    # ── Microsoft Fabric ──────────────────────────────────────────────────────
+    fabric_server: str
+    fabric_database: str
+    fabric_driver: str = "/opt/homebrew/lib/libmsodbcsql.18.dylib"
 
     # ── Nova App ──────────────────────────────────────────────────────────────
     nova_env: str = "development"
@@ -83,31 +82,6 @@ class Settings(BaseSettings):
     # ── Streak & Scoring ─────────────────────────────────────────────────────
     streak_min_seconds_per_day: int = 1800   # 30 minutes
     ai_proficiency_min_score: int = 60       # out of 100
-
-    # ── CSV file names (relative to classmate_data_path) ─────────────────────
-    @property
-    def csv_files(self) -> dict:
-        """
-        Canonical mapping of table name → CSV filename.
-        Used by data/loader.py to know what to ingest.
-        """
-        return {
-            "dim_user":               "classmate_dim_classmate_user_in_.csv",
-            "dim_employee_profile":   "classmate_dim_classmate_employee_profile_in_.csv",
-            "dim_second_level_cat":   "classmate_dim_classmate_second_level_category_in_.csv",
-            "dim_topic":              "classmate_dim_classmate_topic_in_.csv",
-            "dim_content_mapping":    "classmate_dim_classmate_content_mapping_in_.csv",
-            "dim_certificate":        "classmate_dim_classmate_certificate_in_.csv",
-            "dim_training":           "classmate_dim_classmate_training_in_.csv",
-            "vw_trainings":           "classmate_vw_classmate_trainings_in_.csv",
-            "vw_certification":       "classmate_vw_classmate_certification_in_.csv",
-            "fact_user_skill_status": "classmate_fact_classmate_user_skill_status_in_.csv",
-            "fact_learning_credit":   "classmate_fact_classmate_learning_credit_in_.csv",
-            "fact_self_study":        "classmate_fact_classmate_self_study_in_.csv",
-            "fact_certification":     "classmate_fact_classmate_certification_in_.csv",
-            "fact_training_nom":      "classmate_fact_classmate_training_nomination_in_.csv",
-            "mv_quarterly_credits":   "classmate_mv_employee_year_quarter_credits_in_.csv",
-        }
 
 
 @lru_cache(maxsize=1)
