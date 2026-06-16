@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(python -c ' *)",
+      "Bash(uvicorn main:app --reload --port 8000)",
+      "Bash(curl -s http://localhost:8000/api/ping)",
+      "Bash(python -m json.tool)",
+      "Bash(uvicorn main:app --port 8000)",
+      "Bash(pkill -f \"uvicorn main:app\")",
+      "Read(//opt/homebrew/**)",
+      "Read(//usr/local/**)",
+      "Bash(odbcinst -q -d)",
+      "Bash(pip show *)",
+      "Read(//etc/**)",
+      "Read(//Users/suhanimehra/**)"
+    ]
+  }
+}
