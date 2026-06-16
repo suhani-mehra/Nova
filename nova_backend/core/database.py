@@ -40,9 +40,10 @@ def _is_connection_stale() -> bool:
 def _get_credential() -> InteractiveBrowserCredential:
     global _credential
     if _credential is None:
-        _credential = InteractiveBrowserCredential(
-            tenant_id=settings.azure_tenant_id,
-        )
+        # No tenant_id — using the common endpoint produces a token with the
+        # upn claim that Fabric requires for SQL auth. Specifying tenant_id
+        # omits upn and causes 18456.
+        _credential = InteractiveBrowserCredential()
     return _credential
 
 
@@ -62,11 +63,8 @@ def _open_connection() -> pyodbc.Connection:
 
     conn_str = (
         f"Driver={{{settings.fabric_driver}}};"
-        f"Server={settings.fabric_server},1433;"
+        f"Server={settings.fabric_server};"
         f"Database={settings.fabric_database};"
-        "Encrypt=yes;"
-        "TrustServerCertificate=no;"
-        "Connection Timeout=30;"
     )
     return pyodbc.connect(conn_str, attrs_before={1256: token_struct})
 

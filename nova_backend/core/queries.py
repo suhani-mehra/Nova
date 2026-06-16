@@ -4,10 +4,22 @@ All parameterised SQL queries for Nova, organised by feature area.
 Each function accepts a pyodbc connection as its first argument and
 returns a list of dicts via database.query().
 
-Usage:
-    from core.database import get_connection
-    from core.queries import get_employee_profile
-    profile = get_employee_profile(get_connection(), user_id=42)
+Table mapping (schema.actual_name):
+  dim_user                → classmate.dim_classmate_user
+  dim_employee_profile    → classmate.dim_classmate_employee_profile
+  dim_second_level_cat    → classmate.dim_classmate_second_level_category
+  dim_topic               → classmate.dim_classmate_topic
+  dim_content_mapping     → classmate.dim_classmate_content_mapping
+  dim_certificate         → classmate.dim_classmate_certificate
+  dim_training            → classmate.dim_classmate_training
+  vw_trainings            → classmate.vw_classmate_trainings
+  vw_certification        → classmate.vw_classmate_certification
+  fact_user_skill_status  → classmate.fact_classmate_user_skill_status
+  fact_learning_credit    → classmate.fact_classmate_learning_credit
+  fact_self_study         → classmate.fact_classmate_self_study
+  fact_certification      → classmate.fact_classmate_certification
+  fact_training_nom       → classmate.fact_classmate_training_nomination
+  mv_quarterly_credits    → classmate.mv_employee_year_quarter_credits
 """
 
 import pyodbc
@@ -19,23 +31,18 @@ from core.database import query
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_user_by_adname(conn: pyodbc.Connection, aduser_name: str) -> list[dict]:
-    """
-    Used by: auth phase — resolve Azure AD login name → dim_user row.
-    """
+    """Used by: auth phase — resolve Azure AD login name → user row."""
     sql = """
         SELECT id, aduser_name, email_id, first_name, last_name,
                is_active, usertype_id, gender, created_on
-        FROM   dim_user
+        FROM   classmate.dim_classmate_user
         WHERE  aduser_name = ?
     """
     return query(sql, (aduser_name,))
 
 
 def get_employee_profile(conn: pyodbc.Connection, user_id: int) -> list[dict]:
-    """
-    Used by: /api/me — full profile for the logged-in employee.
-    Joins dim_user + dim_employee_profile on user_id.
-    """
+    """Used by: /api/me — full profile for the logged-in employee."""
     sql = """
         SELECT u.id            AS user_id,
                u.first_name,
@@ -49,8 +56,8 @@ def get_employee_profile(conn: pyodbc.Connection, user_id: int) -> list[dict]:
                ep.office_name,
                ep.country_code,
                ep.is_active
-        FROM   dim_user u
-        JOIN   dim_employee_profile ep ON ep.user_id = u.id
+        FROM   classmate.dim_classmate_user u
+        JOIN   classmate.dim_classmate_employee_profile ep ON ep.user_id = u.id
         WHERE  u.id = ?
           AND  ep.is_deleted = 0
     """
@@ -58,15 +65,12 @@ def get_employee_profile(conn: pyodbc.Connection, user_id: int) -> list[dict]:
 
 
 def get_user_completed_courses(conn: pyodbc.Connection, user_id: int) -> list[dict]:
-    """
-    Used by: employee dashboard — completed courses list.
-    status 4052 = Completed. Duration is in seconds.
-    """
+    """Used by: employee dashboard — completed courses list. status 4052 = Completed."""
     sql = """
         SELECT id, course_name, second_level_category_id,
                learning_credits, start_date, completed_on,
                duration, employee_id, display_name
-        FROM   vw_trainings
+        FROM   classmate.vw_classmate_trainings
         WHERE  user_id = ?
           AND  status  = 4052
         ORDER BY completed_on DESC
@@ -75,15 +79,12 @@ def get_user_completed_courses(conn: pyodbc.Connection, user_id: int) -> list[di
 
 
 def get_user_inprogress_courses(conn: pyodbc.Connection, user_id: int) -> list[dict]:
-    """
-    Used by: employee dashboard — in-progress courses widget.
-    status 4035 = InProgress. Duration is in seconds.
-    """
+    """Used by: employee dashboard — in-progress courses widget. status 4035 = InProgress."""
     sql = """
         SELECT id, course_name, second_level_category_id,
                learning_credits, start_date, duration,
                employee_id, display_name
-        FROM   vw_trainings
+        FROM   classmate.vw_classmate_trainings
         WHERE  user_id = ?
           AND  status  = 4035
         ORDER BY start_date DESC
@@ -94,16 +95,12 @@ def get_user_inprogress_courses(conn: pyodbc.Connection, user_id: int) -> list[d
 def get_user_learning_credits_by_date(
     conn: pyodbc.Connection, user_id: int, days: int = 90
 ) -> list[dict]:
-    """
-    Used by: employee dashboard — daily learning activity chart / streak calendar.
-    Returns total duration (seconds) grouped by credit_date for the last N days.
-    credit_date is the streak date field.
-    """
+    """Used by: employee dashboard — daily activity chart / streak calendar."""
     sql = """
         SELECT credit_date,
                SUM(duration) AS total_duration_seconds,
                SUM(value)    AS total_credits
-        FROM   fact_learning_credit
+        FROM   classmate.fact_classmate_learning_credit
         WHERE  user_id    = ?
           AND  is_deleted = 0
           AND  credit_date >= DATEADD(day, -?, GETDATE())
@@ -114,13 +111,10 @@ def get_user_learning_credits_by_date(
 
 
 def get_user_quarterly_credits(conn: pyodbc.Connection, user_id: int) -> list[dict]:
-    """
-    Used by: employee dashboard — quarterly progress chart.
-    Rows older than 2020 are data-migration artifacts; filter them out.
-    """
+    """Used by: employee dashboard — quarterly progress chart."""
     sql = """
         SELECT employee_id, user_id, year, quarter, total_credits
-        FROM   mv_quarterly_credits
+        FROM   classmate.mv_employee_year_quarter_credits
         WHERE  user_id = ?
           AND  year BETWEEN 2020 AND 2026
         ORDER BY year DESC, quarter DESC
@@ -129,17 +123,14 @@ def get_user_quarterly_credits(conn: pyodbc.Connection, user_id: int) -> list[di
 
 
 def get_user_certifications(conn: pyodbc.Connection, user_id: int) -> list[dict]:
-    """
-    Used by: employee dashboard — certifications panel.
-    status 2 = Approved.
-    """
+    """Used by: employee dashboard — certifications panel. status 2 = Approved."""
     sql = """
         SELECT fc.id, fc.certificate_id, fc.completion_date,
                fc.learning_credits, fc.expiry_date, fc.approved_on,
                dc.certificate_name, dc.certificate_provider,
                dc.learning_credit_value
-        FROM   fact_certification fc
-        JOIN   dim_certificate dc ON dc.id = fc.certificate_id
+        FROM   classmate.fact_classmate_certification fc
+        JOIN   classmate.dim_classmate_certificate dc ON dc.id = fc.certificate_id
         WHERE  fc.user_id    = ?
           AND  fc.status     = 2
           AND  fc.is_deleted = 0
@@ -153,10 +144,7 @@ def get_user_certifications(conn: pyodbc.Connection, user_id: int) -> list[dict]
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_direct_reports(conn: pyodbc.Connection, manager_user_id: int) -> list[dict]:
-    """
-    Used by: manager dashboard — team roster.
-    Only returns employees where dim_employee_profile.manager = manager_user_id.
-    """
+    """Used by: manager dashboard — team roster."""
     sql = """
         SELECT ep.user_id,
                ep.employee_id,
@@ -165,8 +153,8 @@ def get_direct_reports(conn: pyodbc.Connection, manager_user_id: int) -> list[di
                ep.designation_code,
                ep.office_name,
                u.email_id
-        FROM   dim_employee_profile ep
-        JOIN   dim_user u ON u.id = ep.user_id
+        FROM   classmate.dim_classmate_employee_profile ep
+        JOIN   classmate.dim_classmate_user u ON u.id = ep.user_id
         WHERE  ep.manager    = ?
           AND  ep.is_active  = 1
           AND  ep.is_deleted = 0
@@ -178,16 +166,13 @@ def get_direct_reports(conn: pyodbc.Connection, manager_user_id: int) -> list[di
 def get_team_course_completions(
     conn: pyodbc.Connection, manager_user_id: int, days: int = 30
 ) -> list[dict]:
-    """
-    Used by: manager dashboard — recent team completions feed.
-    Returns completed courses (status 4052) for direct reports in the last N days.
-    """
+    """Used by: manager dashboard — recent team completions feed."""
     sql = """
         SELECT vt.user_id, vt.course_name, vt.second_level_category_id,
                vt.learning_credits, vt.completed_on, vt.duration,
                vt.employee_id, vt.display_name
-        FROM   vw_trainings vt
-        JOIN   dim_employee_profile ep ON ep.user_id = vt.user_id
+        FROM   classmate.vw_classmate_trainings vt
+        JOIN   classmate.dim_classmate_employee_profile ep ON ep.user_id = vt.user_id
         WHERE  ep.manager     = ?
           AND  ep.is_deleted  = 0
           AND  vt.status      = 4052
@@ -200,17 +185,14 @@ def get_team_course_completions(
 def get_team_quarterly_credits(
     conn: pyodbc.Connection, manager_user_id: int
 ) -> list[dict]:
-    """
-    Used by: manager dashboard — team quarterly credits leaderboard / chart.
-    Rows older than 2020 are data-migration artifacts.
-    """
+    """Used by: manager dashboard — team quarterly credits chart."""
     sql = """
         SELECT mqc.employee_id, mqc.user_id, mqc.year,
                mqc.quarter, mqc.total_credits
-        FROM   mv_quarterly_credits mqc
+        FROM   classmate.mv_employee_year_quarter_credits mqc
         WHERE  mqc.user_id IN (
                    SELECT user_id
-                   FROM   dim_employee_profile
+                   FROM   classmate.dim_classmate_employee_profile
                    WHERE  manager    = ?
                      AND  is_deleted = 0
                )
@@ -221,16 +203,13 @@ def get_team_quarterly_credits(
 
 
 def get_team_inprogress(conn: pyodbc.Connection, manager_user_id: int) -> list[dict]:
-    """
-    Used by: manager dashboard — team in-progress courses overview.
-    status 4035 = InProgress.
-    """
+    """Used by: manager dashboard — team in-progress courses overview."""
     sql = """
         SELECT vt.user_id, vt.course_name, vt.second_level_category_id,
                vt.learning_credits, vt.start_date, vt.duration,
                vt.employee_id, vt.display_name
-        FROM   vw_trainings vt
-        JOIN   dim_employee_profile ep ON ep.user_id = vt.user_id
+        FROM   classmate.vw_classmate_trainings vt
+        JOIN   classmate.dim_classmate_employee_profile ep ON ep.user_id = vt.user_id
         WHERE  ep.manager    = ?
           AND  ep.is_deleted = 0
           AND  vt.status     = 4035
@@ -242,10 +221,7 @@ def get_team_inprogress(conn: pyodbc.Connection, manager_user_id: int) -> list[d
 def get_team_certifications(
     conn: pyodbc.Connection, manager_user_id: int
 ) -> list[dict]:
-    """
-    Used by: manager dashboard — team certifications panel.
-    Uses vw_certification (already joined view).
-    """
+    """Used by: manager dashboard — team certifications panel."""
     sql = """
         SELECT vc.certification_id, vc.user_id, vc.certificate_id,
                vc.completion_date, vc.status, vc.status_name,
@@ -254,10 +230,10 @@ def get_team_certifications(
                vc.is_reimnursed, vc.reimbursed_amount,
                vc.first_name, vc.last_name, vc.email_id,
                vc.employee_id
-        FROM   vw_certification vc
+        FROM   classmate.vw_classmate_certification vc
         WHERE  vc.user_id IN (
                    SELECT user_id
-                   FROM   dim_employee_profile
+                   FROM   classmate.dim_classmate_employee_profile
                    WHERE  manager    = ?
                      AND  is_deleted = 0
                )
@@ -271,14 +247,11 @@ def get_team_certifications(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_active_courses(conn: pyodbc.Connection) -> list[dict]:
-    """
-    Used by: course catalogue page — list all browsable courses.
-    Excludes private and inactive courses.
-    """
+    """Used by: course catalogue page — list all browsable courses."""
     sql = """
         SELECT id, name, description, learning_credits,
                days_to_complete, level_id, image_name, created_on
-        FROM   dim_second_level_cat
+        FROM   classmate.dim_classmate_second_level_category
         WHERE  is_active  = 1
           AND  is_private = 0
         ORDER BY name
@@ -287,13 +260,11 @@ def get_active_courses(conn: pyodbc.Connection) -> list[dict]:
 
 
 def get_course_by_id(conn: pyodbc.Connection, course_id: int) -> list[dict]:
-    """
-    Used by: course detail page.
-    """
+    """Used by: course detail page."""
     sql = """
         SELECT id, name, description, learning_credits,
                days_to_complete, level_id, image_name, created_on
-        FROM   dim_second_level_cat
+        FROM   classmate.dim_classmate_second_level_category
         WHERE  id = ?
     """
     return query(sql, (course_id,))

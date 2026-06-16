@@ -38,9 +38,11 @@ class Settings(BaseSettings):
             f"{self.azure_tenant_id}/v2.0"
         )
 
-    # ── OpenAI ────────────────────────────────────────────────────────────────
+    # ── Azure OpenAI ──────────────────────────────────────────────────────────
     openai_api_key: str
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-4o-mini"          # Azure deployment name
+    openai_api_version: str = "2024-08-01-preview"
+    azure_openai_endpoint: str                  # e.g. https://your-resource.openai.azure.com/
     openai_recommendation_cache_hours: int = 24
 
     # ── Microsoft Fabric ──────────────────────────────────────────────────────
@@ -56,6 +58,11 @@ class Settings(BaseSettings):
     @property
     def is_dev(self) -> bool:
         return self.nova_env == "development"
+
+    @property
+    def azure_configured(self) -> bool:
+        """True when real Azure AD credentials are present (not placeholder values)."""
+        return self.azure_tenant_id.lower() != "placeholder"
 
     # ── Tier Thresholds ───────────────────────────────────────────────────────
     tier_platinum_pct: int = 3

@@ -166,7 +166,10 @@ async def get_current_user(
     """
 
     # ── DEV BYPASS ────────────────────────────────────────────────────────────
-    if settings.azure_tenant_id == "placeholder":
+    # Bypass only when Azure credentials are genuinely absent (AZURE_TENANT_ID=placeholder).
+    # When real credentials are present, enforce JWT validation even in local dev.
+    # To run the frontend without tokens during UI work, set AZURE_TENANT_ID=placeholder.
+    if not settings.azure_configured:
         return _get_dev_user()
 
     # ── PRODUCTION: require a real Bearer token ───────────────────────────────

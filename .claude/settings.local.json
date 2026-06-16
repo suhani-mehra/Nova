@@ -13,7 +13,25 @@
       "Bash(odbcinst -q -d)",
       "Bash(pip show *)",
       "Read(//etc/**)",
-      "Read(//Users/suhanimehra/**)"
+      "Read(//Users/suhanimehra/**)",
+      "Bash(lsof -ti:8000)",
+      "Bash(xargs kill -9)",
+      "Read(//tmp/**)",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s http://localhost:8000/api/me)",
+      "Bash(curl -s http://localhost:8000/api/employee/dashboard)",
+      "Bash(curl -s \"http://localhost:8000/\" -I)",
+      "Bash(curl -s http://localhost:8000/api/employee/team)",
+      "Bash(curl -s http://localhost:8000/api/manager/overview)",
+      "Bash(curl -s http://localhost:8000/api/manager/teams)",
+      "Bash(curl -s \"http://localhost:8000/api/manager/people?filter=all\")",
+      "mcp__Claude_in_Chrome__navigate",
+      "Bash(curl -s http://localhost:8000/)",
+      "Bash(curl -s http://localhost:8000/api.js)",
+      "Bash(curl -s http://localhost:8000/data.js)",
+      "Bash(curl -s http://localhost:8000/app.jsx)",
+      "Bash(curl -s http://localhost:8000/api/auth/token)",
+      "Bash(curl -s http://localhost:8000/api/auth/me)"
     ]
   }
 }

@@ -12,11 +12,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from core.auth import CurrentUser, get_current_user
 from core.config import settings
 from core.database import get_connection
 from core.queries import get_employee_profile
+from nova_db.congrats import init_db as init_congrats_db
+from routers import employee, manager, congrats, auth
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,6 +37,7 @@ def _test_fabric_connection():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    init_congrats_db()
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, _test_fabric_connection)
@@ -61,6 +65,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.include_router(employee.router, prefix="/api")
+app.include_router(manager.router, prefix="/api")
+app.include_router(congrats.router, prefix="/api")
+app.include_router(auth.router,     prefix="/api")
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -120,3 +130,7 @@ def me(user: CurrentUser = Depends(get_current_user)):
         "manager_id": p["manager"],
         "dev_mode": False,
     }
+
+
+# Serve frontend — must come after all API routes
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
