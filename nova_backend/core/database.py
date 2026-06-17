@@ -12,6 +12,7 @@ Usage:
 
 import logging
 import struct
+import threading
 import time
 from typing import Optional
 
@@ -24,36 +25,38 @@ from core.config import settings
 logger = logging.getLogger(__name__)
 
 # ── Connection cache ──────────────────────────────────────────────────────────
+# pyodbc connections are NOT safe for concurrent use across threads.
+# We keep one credential (shared — one browser login) but give each worker
+# thread its own connection via threading.local().
 
 _TOKEN_SCOPE = "https://database.windows.net/.default"
 _CONNECTION_TTL_SECONDS = 55 * 60  # reconnect before the 60-min Azure token expiry
 
 _credential: Optional[InteractiveBrowserCredential] = None
-_connection: Optional[pyodbc.Connection] = None
-_connected_at: float = 0.0
+_credential_lock = threading.Lock()
+_local = threading.local()   # per-thread: .connection, .connected_at
 
 
-def _is_connection_stale() -> bool:
-    return (time.monotonic() - _connected_at) >= _CONNECTION_TTL_SECONDS
+def _is_stale(connected_at: float) -> bool:
+    return (time.monotonic() - connected_at) >= _CONNECTION_TTL_SECONDS
 
 
 def _get_credential() -> InteractiveBrowserCredential:
     global _credential
-    if _credential is None:
-        _credential = InteractiveBrowserCredential(
-            tenant_id=settings.azure_tenant_id,
-        )
+    with _credential_lock:
+        if _credential is None:
+            # For B2B guest accounts the token must come from the user's HOME tenant,
+            # not the Orion (resource) tenant.  Set FABRIC_AUTH_TENANT_ID in .env to
+            # override; falls back to AZURE_TENANT_ID for native Orion accounts.
+            auth_tenant = settings.fabric_auth_tenant_id or settings.azure_tenant_id
+            _credential = InteractiveBrowserCredential(tenant_id=auth_tenant)
     return _credential
 
 
 def _open_connection() -> pyodbc.Connection:
     """
-    Gets an Azure token via browser login (once per session) and passes it
+    Gets an Azure token via browser login (once per process) and passes it
     to pyodbc via SQL_COPT_SS_ACCESS_TOKEN (attrs_before key 1256).
-
-    # TODO (SSO phase): swap InteractiveBrowserCredential for the user's
-    # delegated credential from get_current_user() so the connection runs
-    # as the logged-in user rather than a shared interactive session.
     """
     credential = _get_credential()
     token = credential.get_token(_TOKEN_SCOPE)
@@ -73,35 +76,38 @@ def _open_connection() -> pyodbc.Connection:
 
 def get_connection() -> pyodbc.Connection:
     """
-    Returns an active pyodbc connection to Fabric.
-    - First call: opens browser login.
-    - Subsequent calls within 55 min: returns cached connection, no re-prompt.
-    - After 55 min: reconnects silently using the cached credential.
+    Returns an active pyodbc connection for the current thread.
+    - First call on any thread: reuses the cached credential (one browser login
+      for the whole process), opens a fresh pyodbc connection for this thread.
+    - Subsequent calls on the same thread within 55 min: return the cached
+      per-thread connection with no round-trip to Azure.
+    - After 55 min: silently reconnects this thread's connection.
     """
-    global _connection, _connected_at
+    conn = getattr(_local, "connection", None)
+    connected_at = getattr(_local, "connected_at", 0.0)
 
-    if _connection is not None and not _is_connection_stale():
-        return _connection
+    if conn is not None and not _is_stale(connected_at):
+        return conn
 
-    if _connection is not None:
-        logger.info("Fabric connection is stale — reconnecting.")
+    if conn is not None:
+        logger.info("Fabric connection stale (thread %s) — reconnecting.", threading.current_thread().name)
         try:
-            _connection.close()
+            conn.close()
         except Exception:
             pass
-        _connection = None
+        _local.connection = None
 
     try:
-        _connection = _open_connection()
-        _connected_at = time.monotonic()
-        logger.info("Fabric connection established.")
+        _local.connection = _open_connection()
+        _local.connected_at = time.monotonic()
+        logger.info("Fabric connection established (thread %s).", threading.current_thread().name)
     except Exception as exc:
-        _connection = None
+        _local.connection = None
         if settings.is_dev:
             logger.error("Fabric connection failed (dev mode): %s", exc)
         raise
 
-    return _connection
+    return _local.connection
 
 
 # ── Public query helpers ──────────────────────────────────────────────────────

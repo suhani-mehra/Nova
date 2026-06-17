@@ -12,11 +12,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from core.auth import CurrentUser, get_current_user
 from core.config import settings
 from core.database import get_connection
 from core.queries import get_employee_profile
+from nova_db.congrats import init_db as init_congrats_db
+from routers import employee, manager, congrats, auth
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,6 +37,7 @@ def _test_fabric_connection():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    init_congrats_db()
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, _test_fabric_connection)
@@ -63,6 +67,12 @@ app.add_middleware(
 )
 
 
+app.include_router(employee.router, prefix="/api")
+app.include_router(manager.router, prefix="/api")
+app.include_router(congrats.router, prefix="/api")
+app.include_router(auth.router,     prefix="/api")
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/ping")
@@ -84,39 +94,50 @@ def me(user: CurrentUser = Depends(get_current_user)):
     Post-AD: resolves classmate_user_id → dim_employee_profile row.
     """
     if user.classmate_user_id is None:
-        # Dev bypass — no DB call
+        # Production path before Classmate user lookup is wired
         return {
-            "user_id": None,
-            "name": user.name,
-            "email": user.email,
-            "role": user.role,
-            "azure_oid": user.azure_oid,
-            "department_code": None,
+            "user_id":          None,
+            "name":             user.name,
+            "email":            user.email,
+            "role":             user.role,
+            "department_code":  None,
             "designation_code": None,
-            "employee_id": None,
-            "manager_id": None,
-            "dev_mode": True,
+            "employee_id":      None,
+            "manager_id":       None,
         }
 
-    conn = get_connection()
-    rows = get_employee_profile(conn, user.classmate_user_id)
+    try:
+        conn = get_connection()
+        rows = get_employee_profile(conn, user.classmate_user_id)
+    except Exception as exc:
+        logger.warning("/api/me Fabric lookup failed, returning auth data: %s", exc)
+        rows = []
 
-    if not rows:
-        from fastapi import HTTPException, status
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Employee profile not found in Classmate",
-        )
+    if rows:
+        p = rows[0]
+        return {
+            "user_id":          p["user_id"],
+            "name":             p["name"],
+            "email":            p["email_id"],
+            "role":             user.role,
+            "department_code":  p["department"],
+            "designation_code": p["designation"],
+            "employee_id":      p["employee_id"],
+            "manager_id":       p["manager_user_id"],
+        }
 
-    p = rows[0]
+    # Fabric unreachable or profile not found — return identity from auth layer
     return {
-        "user_id": p["user_id"],
-        "name": p["display_name"] or f"{p['first_name']} {p['last_name']}",
-        "email": p["email_id"],
-        "role": user.role,
-        "department_code": p["department_code"],
-        "designation_code": p["designation_code"],
-        "employee_id": p["employee_id"],
-        "manager_id": p["manager"],
-        "dev_mode": False,
+        "user_id":          user.classmate_user_id,
+        "name":             user.name,
+        "email":            user.email,
+        "role":             user.role,
+        "department_code":  None,
+        "designation_code": None,
+        "employee_id":      None,
+        "manager_id":       None,
     }
+
+
+# Serve frontend — must come after all API routes
+app.mount("/", StaticFiles(directory="static", html=True), name="static")

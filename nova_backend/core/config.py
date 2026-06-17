@@ -38,24 +38,43 @@ class Settings(BaseSettings):
             f"{self.azure_tenant_id}/v2.0"
         )
 
-    # ── OpenAI ────────────────────────────────────────────────────────────────
+    # ── Azure OpenAI ──────────────────────────────────────────────────────────
     openai_api_key: str
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-4o-mini"          # Azure deployment name
+    openai_api_version: str = "2024-08-01-preview"
+    azure_openai_endpoint: str                  # e.g. https://your-resource.openai.azure.com/
     openai_recommendation_cache_hours: int = 24
 
     # ── Microsoft Fabric ──────────────────────────────────────────────────────
     fabric_server: str
     fabric_database: str
     fabric_driver: str = "/opt/homebrew/lib/libmsodbcsql.18.dylib"
+    # fabric_auth_tenant_id: the tenant to use when obtaining a token for
+    # the Fabric SQL connection.  For B2B guest accounts this must be the
+    # user's HOME tenant, not the Orion (resource) tenant.
+    # Defaults to azure_tenant_id (works for native Orion accounts).
+    fabric_auth_tenant_id: str = ""
 
     # ── Nova App ──────────────────────────────────────────────────────────────
     nova_env: str = "development"
     nova_secret_key: str
     nova_cors_origins: List[str] = ["http://localhost:5500"]
+    nova_dev_bypass: bool = False  # set NOVA_DEV_BYPASS=true in .env to skip JWT auth
 
     @property
     def is_dev(self) -> bool:
         return self.nova_env == "development"
+
+    @property
+    def azure_configured(self) -> bool:
+        """
+        True when real Azure AD JWT validation should run.
+        Set NOVA_DEV_BYPASS=true in .env to use the Fabric dev user
+        even when a real tenant ID is present (e.g. needed for Fabric).
+        """
+        if self.nova_dev_bypass:
+            return False
+        return self.azure_tenant_id.lower() != "placeholder"
 
     # ── Tier Thresholds ───────────────────────────────────────────────────────
     tier_platinum_pct: int = 3
