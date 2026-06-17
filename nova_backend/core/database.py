@@ -65,11 +65,8 @@ def _open_connection() -> pyodbc.Connection:
 
     conn_str = (
         f"Driver={{{settings.fabric_driver}}};"
-        f"Server={settings.fabric_server},1433;"
+        f"Server={settings.fabric_server};"
         f"Database={settings.fabric_database};"
-        "Encrypt=yes;"
-        "TrustServerCertificate=no;"
-        "Connection Timeout=30;"
     )
     return pyodbc.connect(conn_str, attrs_before={1256: token_struct})
 
