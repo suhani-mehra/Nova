@@ -97,21 +97,57 @@ def get_team_highlights(manager_user_id: int, conn=None) -> dict:
     }
 
 
-def get_team_accomplishments(manager_user_id: int, conn=None, days: int = 7) -> list:
-    rows = query(
-        """
-        SELECT vt.user_id, vt.display_name AS employee_name,
-               vt.course_name, vt.completed_on, vt.learning_credits
-        FROM   classmate.vw_classmate_trainings vt
-        JOIN   classmate.dim_classmate_employee_profile ep ON ep.user_id = vt.user_id
-        WHERE  ep.manager    = ?
-          AND  ep.is_deleted = 0
-          AND  vt.status     = 4052
-          AND  vt.completed_on >= DATEADD(day, -?, GETDATE())
-        ORDER BY vt.completed_on DESC
-        """,
-        (manager_user_id, days),
-    )
+def get_team_accomplishments(
+    manager_user_id: int, days: int = 30, own_user_id: int = None, conn=None
+) -> list:
+    """
+    Completions for everyone who reports to manager_user_id (peers),
+    plus everyone who reports directly to own_user_id (direct reports),
+    when own_user_id is supplied.
+    """
+    if own_user_id is not None:
+        # Include both peer group and own direct reports
+        rows = query(
+            """
+            SELECT TOP 50
+                vt.user_id, vt.display_name AS employee_name,
+                vt.course_name, vt.completed_on, vt.learning_credits
+            FROM   classmate.vw_classmate_trainings vt
+            WHERE  vt.status       = 4052
+              AND  vt.completed_on >= DATEADD(day, -?, GETDATE())
+              AND  vt.user_id IN (
+                  SELECT DISTINCT user_id
+                  FROM   classmate.dim_classmate_employee_profile
+                  WHERE  manager IN (?, ?)
+                    AND  is_active    = 1
+                    AND  is_deleted   = 0
+                    AND  etl_isactive = 1
+              )
+            ORDER BY vt.completed_on DESC
+            """,
+            (days, manager_user_id, own_user_id),
+        )
+    else:
+        rows = query(
+            """
+            SELECT TOP 50
+                vt.user_id, vt.display_name AS employee_name,
+                vt.course_name, vt.completed_on, vt.learning_credits
+            FROM   classmate.vw_classmate_trainings vt
+            WHERE  vt.status       = 4052
+              AND  vt.completed_on >= DATEADD(day, -?, GETDATE())
+              AND  vt.user_id IN (
+                  SELECT DISTINCT user_id
+                  FROM   classmate.dim_classmate_employee_profile
+                  WHERE  manager      = ?
+                    AND  is_active    = 1
+                    AND  is_deleted   = 0
+                    AND  etl_isactive = 1
+              )
+            ORDER BY vt.completed_on DESC
+            """,
+            (days, manager_user_id),
+        )
     return [
         {
             "employee_name":   r["employee_name"],
@@ -129,10 +165,15 @@ def get_team_course_popularity(manager_user_id: int, conn=None) -> list:
         """
         SELECT TOP 5 vt.course_name, COUNT(*) AS completion_count
         FROM   classmate.vw_classmate_trainings vt
-        JOIN   classmate.dim_classmate_employee_profile ep ON ep.user_id = vt.user_id
-        WHERE  ep.manager    = ?
-          AND  ep.is_deleted = 0
-          AND  vt.status     = 4052
+        WHERE  vt.status = 4052
+          AND  vt.user_id IN (
+              SELECT DISTINCT user_id
+              FROM   classmate.dim_classmate_employee_profile
+              WHERE  manager      = ?
+                AND  is_active    = 1
+                AND  is_deleted   = 0
+                AND  etl_isactive = 1
+          )
         GROUP BY vt.course_name
         ORDER BY completion_count DESC
         """,

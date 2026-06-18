@@ -175,18 +175,14 @@ async def employee_team(user: CurrentUser = Depends(get_current_user)):
 
     uid = user.classmate_user_id
     try:
-        # For managers/dual-role users show their own direct reports.
-        # For regular employees show their peer team (people under their manager).
-        if user.role in ("manager", "both"):
-            manager_id = uid
-        else:
-            manager_id = await _run(_get_manager_id, uid)
+        # Always show the team the employee belongs to: everyone under their own manager.
+        manager_id = await _run(_get_manager_id, uid)
 
         if manager_id is None:
             return {"accomplishments": [], "popular_courses": [], "highlights": {}}
 
         accomplishments, popular_courses, highlights = await asyncio.gather(
-            _run(get_team_accomplishments, manager_id),
+            _run(get_team_accomplishments, manager_id, 14, uid),
             _run(get_team_course_popularity, manager_id),
             _run(get_team_highlights, manager_id),
         )

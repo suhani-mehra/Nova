@@ -110,18 +110,17 @@ def is_manager(conn: pyodbc.Connection, user_id: int) -> bool:
 def get_direct_reports(conn: pyodbc.Connection, manager_user_id: int) -> list[dict]:
     """
     All active direct reports for manager_user_id.
-    Uses dedup CTE.  Strings normalised and .title()'d before return.
+    Uses dedup CTE. No join to dim_classmate_user — that table has multiple rows
+    per user_id and would cause SCD fan-out duplicates.
     """
     sql = _DEDUP_CTE + """
         SELECT
             ep.user_id,
-            u.email_id,
             ep.employee_id,
-            LOWER(TRIM(ep.display_name))    AS name,
-            LOWER(TRIM(ep.department_code)) AS department,
+            LOWER(TRIM(ep.display_name))     AS name,
+            LOWER(TRIM(ep.department_code))  AS department,
             LOWER(TRIM(ep.designation_code)) AS designation
         FROM   latest_profiles ep
-        JOIN   classmate.dim_classmate_user u ON u.id = ep.user_id
         WHERE  ep.rn      = 1
           AND  ep.manager = ?
         ORDER BY ep.display_name
@@ -226,7 +225,7 @@ def get_manager_monthly_trend(
     Last 6 months of completions for a manager's direct reports.
     Uses dedup CTE on employee_profile join.
     """
-    sql = _DEDUP_CTE + """
+    sql = """
         SELECT
             FORMAT(vt.completed_on, 'MMM') AS month,
             MONTH(vt.completed_on)          AS month_num,
@@ -234,11 +233,16 @@ def get_manager_monthly_trend(
             SUM(vt.learning_credits)        AS credits,
             COUNT(*)                        AS completions
         FROM   classmate.vw_classmate_trainings vt
-        JOIN   latest_profiles ep ON ep.user_id = vt.user_id
-        WHERE  ep.rn       = 1
-          AND  ep.manager  = ?
-          AND  vt.status   = 4052
+        WHERE  vt.status       = 4052
           AND  vt.completed_on >= DATEADD(month, -6, GETDATE())
+          AND  vt.user_id IN (
+              SELECT DISTINCT user_id
+              FROM   classmate.dim_classmate_employee_profile
+              WHERE  manager      = ?
+                AND  is_active    = 1
+                AND  is_deleted   = 0
+                AND  etl_isactive = 1
+          )
         GROUP BY FORMAT(vt.completed_on, 'MMM'),
                  MONTH(vt.completed_on),
                  YEAR(vt.completed_on)
