@@ -28,6 +28,29 @@ async function apiPost(path, body) {
   }
 }
 
+// ── Avatar gradient palette ────────────────────────────────────────────────────
+// Each entry is [from, to] for a CSS linear-gradient.
+// Deterministic: same name always maps to the same gradient.
+const _AV_PALETTES = [
+  ['#A634FF', '#FF4398'],
+  ['#2ACCFF', '#5400DC'],
+  ['#e08531', '#C21178'],
+  ['#1FA971', '#2ACCFF'],
+  ['#F588FF', '#A634FF'],
+  ['#FF6B88', '#e08531'],
+  ['#5400DC', '#FF4398'],
+  ['#2ACCFF', '#1FA971'],
+];
+
+function _nameToGrad(name) {
+  let h = 0;
+  const s = (name || '').toLowerCase();
+  for (let i = 0; i < s.length; i++) {
+    h = (h * 31 + s.charCodeAt(i)) & 0xffff;
+  }
+  return _AV_PALETTES[h % _AV_PALETTES.length];
+}
+
 // ── Tier metadata ─────────────────────────────────────────────────────────────
 
 const TIER_META = {
@@ -74,15 +97,22 @@ function mapDashboard(data) {
   };
 }
 
+const _RECO_TILES = [
+  ['#A634FF','#5400DC'],
+  ['#2ACCFF','#5400DC'],
+  ['#1FA971','#2ACCFF'],
+  ['#e08531','#C21178'],
+];
+
 function mapTeam(data) {
   return {
     learningTime: data.highlights.top_learner
       ? data.highlights.top_learner.credits + ' credits'
       : '—',
     highlights: {
-      congrats:  0,
-      topCourse: data.popular_courses[0]?.course_name || '—',
-      timeDelta: 0,
+      congrats:  data.congrats_this_week ?? 0,
+      topCourse: data.top_course || '—',
+      timeDelta: data.highlights?.time_delta_pct ?? 0,
     },
     accomplishments: data.accomplishments.map(a => ({
       name: a.employee_name,
@@ -90,22 +120,34 @@ function mapTeam(data) {
       ach:  a.course_name,
       type: 'course',
       time: a.completed_on,
-      av:   ['#A634FF', '#FF4398'],
+      av:   _nameToGrad(a.employee_name),
     })),
-    recommended: data.popular_courses.map(c => ({
+    recommended: (data.popular_courses || []).map((c, i) => ({
       name:  c.course_name,
-      badge: c.category,
-      cls:   c.category.toLowerCase(),
-      meta:  `Completed by ${c.completion_count} teammates`,
-      match: 75,
-      tile:  ['#2ACCFF', '#5400DC'],
-      glyph: c.category.slice(0, 2),
+      badge: c.category || 'Other',
+      cls:   (c.category || 'other').toLowerCase(),
+      meta:  `Completed by ${c.completion_count} teammate${c.completion_count === 1 ? '' : 's'}`,
+      match: Math.max(60, 92 - i * 8),
+      tile:  _RECO_TILES[i % _RECO_TILES.length],
+      glyph: (c.category || 'Ot').slice(0, 2),
     })),
   };
 }
 
 function mapManager(data, teamsData, peopleData) {
   const cols = ['#A634FF','#2ACCFF','#5400DC','#FF4398','#F588FF','#e08531','#C21178','#FF6B88'];
+
+  const aiTrendPts      = data.kpis.ai_proficiency_trend_pts ?? 0;
+  const activeTrendPct  = data.kpis.active_week_trend_pct    ?? 0;
+  const retRate         = data.kpis.retention_rate           ?? 0;
+  const retTrendPct     = data.kpis.retention_rate_trend_pct ?? 0;
+  const retTrendDir     = data.kpis.retention_rate_trend_dir ?? 'flat';
+  const atRiskCount     = data.kpis.at_risk_count_company    ?? data.at_risk.length;
+  const atRiskTrendPct  = data.kpis.at_risk_count_trend_pct  ?? 0;
+  const atRiskTrendDir  = data.kpis.at_risk_count_trend_dir  ?? 'flat';
+
+  const _sign = n => n >= 0 ? '+' : '';
+
   return {
     total:  data.kpis.total_team,
     goal:   'Every employee AI-proficient',
@@ -115,62 +157,72 @@ function mapManager(data, teamsData, peopleData) {
         key: 'prof',
         num: data.kpis.ai_proficient_pct.toFixed(0) + '%',
         lab: `AI-proficient — <b>${data.kpis.ai_proficient_count} of ${data.kpis.total_team}</b>`,
-        trend: '+0 pts', dir: 'up', ic: 'spark',
+        trend: _sign(aiTrendPts) + aiTrendPts.toFixed(1) + ' pts',
+        dir:   aiTrendPts > 0 ? 'up' : aiTrendPts < 0 ? 'down' : 'flat',
+        ic: 'spark',
         tint: 'rgba(166,52,255,.12)', col: '#A634FF',
       },
       {
         key: 'active',
         num: data.kpis.active_this_week.toLocaleString(),
         lab: 'Active learners <b>this week</b>',
-        trend: '+0%', dir: 'up', ic: 'users',
+        trend: _sign(activeTrendPct) + activeTrendPct.toFixed(0) + '%',
+        dir:   activeTrendPct > 0 ? 'up' : activeTrendPct < 0 ? 'down' : 'flat',
+        ic: 'users',
         tint: 'rgba(42,204,255,.14)', col: '#0f8fc4',
       },
       {
-        key: 'ret', num: '—',
+        key: 'ret',
+        num: retRate.toFixed(0) + '%',
         lab: 'Learning <b>retention rate</b>',
-        trend: '—', dir: 'flat', ic: 'shield',
+        trend: _sign(retTrendPct) + retTrendPct.toFixed(0) + '%',
+        dir:   retTrendDir,
+        ic: 'shield',
         tint: 'rgba(31,169,113,.14)', col: '#1FA971',
       },
       {
         key: 'risk',
-        num: data.at_risk.length.toString(),
+        num: atRiskCount.toString(),
         lab: 'Employees <b>falling behind</b>',
-        trend: '—', dir: 'down', ic: 'alert',
+        trend: _sign(atRiskTrendPct) + Math.abs(Math.round(atRiskTrendPct)) + '%',
+        dir:   atRiskTrendDir,
+        ic: 'alert',
         tint: 'rgba(226,61,110,.12)', col: '#E23D6E',
       },
     ],
     months: data.monthly_trend.map(m => m.month),
     series: {
       proficiency: data.monthly_trend.map(m => m.credits),
-      retention:   data.monthly_trend.map(m => 0),
+      retention:   data.monthly_trend.map(m => m.retention ?? 0),
     },
     distribution: [],
     teams: teamsData.departments.map((d, i) => {
-      const pct = d.ai_proficient_pct;
+      const pct      = d.ai_proficient_pct;
+      const trendPct = d.trend_pct ?? 0;
       return {
         name:    d.name,
         members: d.headcount,
         prof:    Math.round(pct),
-        trend:   '+0%',
-        dir:     'flat',
+        trend:   _sign(trendPct) + Math.round(trendPct) + '%',
+        dir:     trendPct > 0 ? 'up' : trendPct < 0 ? 'down' : 'flat',
         status:  pct >= 70 ? 'ok' : pct >= 50 ? 'warn' : 'risk',
         col:     cols[i % cols.length],
       };
     }),
     people: peopleData.employees.map(e => ({
-      user_id:    e.user_id,
-      name:       e.name,
-      role:       e.department,
-      team:       e.department,
-      department: e.department,
+      user_id:     e.user_id,
+      name:        e.name,
+      role:        e.department,
+      team:        e.department,
+      department:  e.department,
       designation: e.designation || '',
-      tier:       e.tier,
-      prof:       Math.round(e.ai_proficiency),
-      trend:      '+0%',
-      dir:        e.status === 'thriving' ? 'up' : e.status === 'at_risk' ? 'down' : 'flat',
-      status:     e.status === 'thriving' ? 'ok'  : e.status === 'at_risk' ? 'risk' : 'warn',
-      av:         ['#A634FF', '#FF4398'],
-      scoredBy:   e.scored_by || 'keywords',
+      tier:        e.tier,
+      prof:        Math.round(e.ai_proficiency),
+      trend:       _sign(e.ai_trend_pct ?? 0) + Math.round(e.ai_trend_pct ?? 0) + '%',
+      dir:         e.ai_trend_dir || 'flat',
+      status:      e.status === 'thriving' ? 'ok' : e.status === 'at_risk' ? 'risk' : 'warn',
+      av:          _nameToGrad(e.name),
+      scoredBy:    e.scored_by || 'keywords',
     })),
   };
 }

@@ -16,9 +16,11 @@ function CourseTile({grad, glyph, size=54, glyphSize=1}){
     h('div', {style:{position:'absolute', top:'50%', left:'50%', transform:'translate(-50%, -57%)', fontSize:size*glyphSize, lineHeight:1}}, glyph));
 }
 
-function CongratsButton(){
+function CongratsButton({onSend}){
   const [sent,setSent]=useStateE(false);
-  return h('button',{className:'btn-congrats'+(sent?' sent':''), onClick:()=>setSent(true), disabled:sent},
+  return h('button',{className:'btn-congrats'+(sent?' sent':''),
+    onClick:()=>{ setSent(true); if(onSend) onSend(); },
+    disabled:sent},
     sent?'Sent ✓':'Congrats');
 }
 
@@ -32,10 +34,14 @@ const achIcon = (type)=>{
   return (map[type]||map.course).ic;
 };
 
+const _radarShift = arr => arr.map(v => 25 + Math.round((v / 100) * 75));
+
 /* ---------------- MY PROGRESS ---------------- */
 function MyProgress(){
   const E=NOVA.employee, T=NOVA.TIERS;
   const days=['M','T','W','T','F','S','S'];
+  const curMeta  = TIER_META[E.currentTier]  || TIER_META.gold;
+  const nextMeta = TIER_META[E.nextTier]     || TIER_META.diamond;
   return h('div',{className:'page'},
     // Tier card
     h('div',{className:'card tier-card', style:{marginBottom:22}},
@@ -43,11 +49,11 @@ function MyProgress(){
         h('div',{className:'card-title'},'Your Tier'),
         h(TierTrack,{tiers:T, currentKey:E.currentTier}),
         h('div',{className:'tier-progress'},
-          h(Hex,{color:'#f5b71e',glyph:tierHexInner('gold'),active:true,size:42}),
+          h(Hex,{color:curMeta.color, glyph:tierHexInner(E.currentTier), active:true, size:42}),
           h('div',{className:'bar'}, h('i',{style:{width:E.tierProgress+'%'}})),
-          h(Hex,{color:'#2ACCFF',glyph:tierHexInner('diamond'),active:false,size:42})
+          h(Hex,{color:nextMeta.color, glyph:tierHexInner(E.nextTier), active:false, size:42})
         ),
-        h('div',{className:'next-tier'},'Next tier: ', h('b',null,'Diamond'))
+        h('div',{className:'next-tier'},'Next tier: ', h('b',null,nextMeta.name))
       ),
       h('aside',{className:'badges'},
         h('div',{className:'badges-title'},'Badges Earned'),
@@ -73,7 +79,7 @@ function MyProgress(){
       // skill growth
       h('div',{className:'card tall'},
         h('div',{className:'card-title'},'Skill Growth'),
-        h(RadarChart,{axes:E.skills.axes, thisMonth:E.skills.thisMonth, lastMonth:E.skills.lastMonth, size:300}),
+        h(RadarChart,{axes:E.skills.axes, thisMonth:_radarShift(E.skills.thisMonth), lastMonth:_radarShift(E.skills.lastMonth), size:300}),
         h('div',{className:'legend'},
           h('div',{className:'it'}, h('span',{className:'sw',style:{background:'#A634FF'}}),'This Month'),
           h('div',{className:'it'}, h('span',{className:'sw',style:{background:'#2ACCFF',opacity:.7}}),'Last Month')),
@@ -81,25 +87,32 @@ function MyProgress(){
       ),
       // continue + recommended
       h('div',{style:{display:'flex',flexDirection:'column',gap:22}},
-        h('div',{className:'card'},
-          h('div',{className:'card-title', style:{marginBottom:18}},'Continue Learning'),
-          h('div',{className:'course-row'},
-            h(CourseTile,{grad:E.continueCourse.tile, glyph:'⚛', glyphSize:.8}),
-            h('div',null,
-              h('div',{className:'course-name'},E.continueCourse.name),
-              h('div',{className:'course-meta', style:{color:'#FF4398'}},E.continueCourse.status))),
-          h('div',{style:{display:'flex',alignItems:'center',gap:12,margin:'18px 0'}},
-            h('div',{className:'pbar', style:{flex:1}}, h('i',{style:{width:E.continueCourse.progress+'%'}})),
-            h('div',{style:{fontWeight:700,fontSize:13.5,color:'var(--ink-soft)'}},`${E.continueCourse.progress}% Complete`)),
-          h('button',{className:'btn-grad'},'Continue Learning')),
-        h('div',{className:'card'},
-          h('div',{className:'card-title', style:{marginBottom:16}},'Recommended for You'),
-          h('div',{className:'reco'},
-            h(CourseTile,{grad:E.recommended.tile, glyph:'AI', size:42, glyphSize:0.7}),
-            h('div',null,
-              h('div',{style:{fontWeight:800,fontSize:15.5}},E.recommended.name),
-              h('div',{className:'course-meta',style:{color:'var(--muted)'}},E.recommended.meta)),
-            h('span',{className:'arrow'}, Icons.chevR({size:20}))))
+        E.continueCourse
+          ? h('div',{className:'card'},
+              h('div',{className:'card-title', style:{marginBottom:18}},'Continue Learning'),
+              h('div',{className:'course-row'},
+                h(CourseTile,{grad:E.continueCourse.tile, glyph:'⚛', glyphSize:.8}),
+                h('div',null,
+                  h('div',{className:'course-name'},E.continueCourse.name),
+                  h('div',{className:'course-meta', style:{color:'#FF4398'}},E.continueCourse.status))),
+              h('div',{style:{display:'flex',alignItems:'center',gap:12,margin:'18px 0'}},
+                h('div',{className:'pbar', style:{flex:1}}, h('i',{style:{width:E.continueCourse.progress+'%'}})),
+                h('div',{style:{fontWeight:700,fontSize:13.5,color:'var(--ink-soft)'}},`${E.continueCourse.progress}% Complete`)),
+              h('button',{className:'btn-grad'},'Continue Learning'))
+          : h('div',{className:'card'},
+              h('div',{className:'card-title'},'Continue Learning'),
+              h('div',{style:{color:'var(--muted)',fontSize:14,padding:'18px 0'}},'No course in progress. Browse the library to get started.'),
+              h('button',{className:'btn-grad'},'Browse Courses')),
+        E.recommended
+          ? h('div',{className:'card'},
+              h('div',{className:'card-title', style:{marginBottom:16}},'Recommended for You'),
+              h('div',{className:'reco'},
+                h(CourseTile,{grad:E.recommended.tile, glyph:'AI', size:42, glyphSize:0.7}),
+                h('div',null,
+                  h('div',{style:{fontWeight:800,fontSize:15.5}},E.recommended.name),
+                  h('div',{className:'course-meta',style:{color:'var(--muted)'}},E.recommended.meta)),
+                h('span',{className:'arrow'}, Icons.chevR({size:20}))))
+          : null
       )
     )
   );
@@ -108,6 +121,8 @@ function MyProgress(){
 /* ---------------- MY TEAM ---------------- */
 function MyTeam(){
   const TM=NOVA.team, first=NOVA.accounts.employee.first;
+  const [localCongrats, setLocalCongrats] = useStateE(0);
+  const onCongratsSent = () => setLocalCongrats(n => n + 1);
   const hr=new Date().getHours();
   const part = hr<12?'morning':hr<18?'afternoon':'evening';
   return h('div',{className:'page'},
@@ -121,22 +136,22 @@ function MyTeam(){
       h('div',{className:'highlights'},
         h('div',{className:'hl'},
           h('div',{className:'ic',style:{background:'rgba(166,52,255,.1)'}},h('i', {className: 'fas fa-hands-clapping', style: {color: "rgb(167, 53, 255)", fontSize: 26}})),
-          h('div',null, h('div',{className:'big'},TM.highlights.congrats),
+          h('div',null, h('div',{className:'big'},TM.highlights.congrats + localCongrats),
             h('div',{className:'lab'},'Congrats sent this week'))),
         h('div',{className:'hl'},
           h('div',{className:'ic',style:{background:'rgba(42,204,255,.12)'}}, Icons.book({size:26,color:'#2ACCFF'})),
           h('div',null, h('div',{className:'lab strong'},TM.highlights.topCourse),
             h('div',{className:'lab'},'Most completed course'))),
         h('div',{className:'hl'},
-          h('div',{className:'ic',style:{background:'rgba(31,169,113,.12)'}}, Icons.trend({size:26,color:'#1FA971'})),
-          h('div',null, h('div',{className:'big',style:{color:'#1FA971'}},`+${TM.highlights.timeDelta}%`),
+          h('div',{className:'ic',style:{background:TM.highlights.timeDelta>=0?'rgba(31,169,113,.12)':'rgba(226,61,110,.12)'}}, Icons.trend({size:26,color:TM.highlights.timeDelta>=0?'#1FA971':'#E23D6E'})),
+          h('div',null, h('div',{className:'big',style:{color:TM.highlights.timeDelta>=0?'#1FA971':'#E23D6E'}},`${TM.highlights.timeDelta>=0?'+':''}${TM.highlights.timeDelta}%`),
             h('div',{className:'lab'},'Team learning time vs last week')))
       )
     ),
     // two columns
     h('div',{className:'grid cols-2'},
       // accomplishments
-      h('div',{className:'card',style:{display:'flex',flexDirection:'column'}},
+      h('div',{className:'card',style:{display:'flex',flexDirection:'column',minHeight:460}},
         h('div',{className:'card-title'},'Team Accomplishments'),
         h('div',{className:'card-sub'},'See what your team has achieved this week.'),
         h('div',{style:{position:'relative',flex:1,minHeight:0}},
@@ -149,7 +164,7 @@ function MyTeam(){
                   h('span',{className:'verb'},a.verb),' ',
                   h('span',{className:'ach'},a.ach))),
               h('div',{className:'time'},a.time),
-              h(CongratsButton,null))))),
+              h(CongratsButton,{onSend:onCongratsSent}))))),
       ),
       // recommended
       h('div',{className:'card'},

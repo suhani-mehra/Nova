@@ -70,13 +70,10 @@ const TABS = {
 };
 
 function TopKPI({account}){
-  if(account==='employee')
-    return h('div',{className:'kpi-pill'},
-      h('div',{className:'ic'}, Icons.clock({size:19})),
-      h('div',null, h('div',{className:'lab'},'Learning Time This Week'), h('div',{className:'val'},NOVA.employee.learningTime)));
+  if(account==='employee') return null;
   return h('div',{className:'kpi-pill'},
     h('div',{className:'ic',style:{background:'rgba(42,204,255,.12)',color:'#0f8fc4'}}, Icons.users({size:19})),
-    h('div',null, h('div',{className:'lab'},'Active Learners This Week'), h('div',{className:'val'},'—')));
+    h('div',null, h('div',{className:'lab'},'Active Learners This Week'), h('div',{className:'val'},(window.NOVA?.manager?.kpis?.[1]?.num)||'—')));
 }
 
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{

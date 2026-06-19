@@ -5,7 +5,9 @@ Employee-facing endpoints: /api/employee/dashboard and /api/employee/team.
 
 import asyncio
 import logging
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from fastapi import APIRouter, Depends
 
@@ -82,9 +84,195 @@ _PLACEHOLDER_TEAM = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+_SQLITE_DB = Path(__file__).parent.parent / "nova_local.db"
+
+
 async def _run(fn, *args):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(_executor, fn, *args)
+
+
+def _get_direct_report_ids(manager_id: int) -> list:
+    rows = query(
+        """
+        SELECT DISTINCT user_id
+        FROM   classmate.dim_classmate_employee_profile
+        WHERE  manager      = ?
+          AND  is_active    = 1
+          AND  is_deleted   = 0
+          AND  etl_isactive = 1
+        """,
+        (manager_id,),
+    )
+    return [r["user_id"] for r in rows]
+
+
+def _get_team_congrats_week(manager_id: int) -> int:
+    uids = _get_direct_report_ids(manager_id)
+    if not uids:
+        return 0
+    try:
+        conn = sqlite3.connect(str(_SQLITE_DB))
+        conn.row_factory = sqlite3.Row
+        ph = ",".join("?" * len(uids))
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS cnt
+            FROM   congrats
+            WHERE  created_at >= datetime('now', '-7 days')
+              AND  (sender_user_id IN ({ph}) OR receiver_user_id IN ({ph}))
+            """,
+            uids * 2,
+        ).fetchone()
+        conn.close()
+        return int(row["cnt"]) if row else 0
+    except Exception:
+        return 0
+
+
+_TRAINING_KEYWORDS = [
+    'iso ', 'isms', 'mandatory ', 'compliance', 'awareness on',
+    'waste reduction', 'hazardous', 'workplace safety', 'energy and climate',
+    'information security training', 'fire safety', 'anti-bribery', 'anti bribery',
+    'code of conduct', 'data privacy', 'gdpr', 'posh', 'sexual harassment',
+]
+
+
+def _is_training_module_by_name(name: str) -> bool:
+    nl = name.lower()
+    return any(kw in nl for kw in _TRAINING_KEYWORDS)
+
+
+def _filter_training_modules(courses: list) -> list:
+    """Remove training/compliance modules. Uses a combination of:
+    1. Explicit training keyword check (highest priority)
+    2. GPT vertical scores from SQLite (0 across all = training)
+    3. Keyword category classifier fallback
+    """
+    if not courses:
+        return courses
+    names = [c["course_name"] for c in courses]
+    scores_by_name: dict = {}
+    try:
+        conn = sqlite3.connect(str(_SQLITE_DB))
+        conn.row_factory = sqlite3.Row
+        ph = ",".join("?" * len(names))
+        rows = conn.execute(
+            f"SELECT item_name, ai, cloud, frontend, backend, data FROM course_vertical_scores WHERE item_name IN ({ph})",
+            names,
+        ).fetchall()
+        conn.close()
+        scores_by_name = {r["item_name"]: r for r in rows}
+    except Exception:
+        pass
+
+    from services.skill_service import _classify
+    result = []
+    for c in courses:
+        name = c["course_name"]
+        # Always filter obvious compliance/training modules by name
+        if _is_training_module_by_name(name):
+            continue
+        if name in scores_by_name:
+            r = scores_by_name[name]
+            total = (r["ai"] or 0) + (r["cloud"] or 0) + (r["frontend"] or 0) + (r["backend"] or 0) + (r["data"] or 0)
+            # Keep if scores show real vertical content OR keyword classifier recognises it
+            if total >= 5 or _classify(name) is not None:
+                result.append(c)
+        else:
+            # Not scored yet — keep unless keyword classifier explicitly rejects it
+            # (unrecognised but non-training names pass through)
+            result.append(c)
+    return result
+
+
+def _get_team_completions_delta(manager_id: int, uid: int) -> float:
+    """% change in course completions by team (peers + direct reports) this week vs last week."""
+    rows = query(
+        """
+        SELECT
+            SUM(CASE WHEN completed_on >= DATEADD(day,-7,GETDATE()) THEN 1 ELSE 0 END) AS this_week,
+            SUM(CASE WHEN completed_on >= DATEADD(day,-14,GETDATE())
+                      AND completed_on <  DATEADD(day,-7,GETDATE())  THEN 1 ELSE 0 END) AS last_week
+        FROM classmate.vw_classmate_trainings
+        WHERE status = 4052
+          AND user_id IN (
+              SELECT DISTINCT user_id
+              FROM   classmate.dim_classmate_employee_profile
+              WHERE  manager IN (?,?) AND is_active=1 AND is_deleted=0 AND etl_isactive=1
+          )
+          AND completed_on >= DATEADD(day,-14,GETDATE())
+        """,
+        (manager_id, uid),
+    )
+    if not rows:
+        return 0.0
+    this_week = int(rows[0]["this_week"] or 0)
+    last_week = int(rows[0]["last_week"] or 0)
+    if last_week == 0:
+        return 0.0 if this_week == 0 else 100.0
+    return round((this_week - last_week) / last_week * 100, 1)
+
+
+def _get_team_top_courses(manager_id: int, uid: int) -> list:
+    """Top 20 most-completed courses by the full team (peers + direct reports)."""
+    from services.skill_service import _classify
+    rows = query(
+        """
+        SELECT TOP 20 vt.course_name, COUNT(*) AS completion_count
+        FROM   classmate.vw_classmate_trainings vt
+        WHERE  vt.status = 4052
+          AND  vt.user_id IN (
+              SELECT DISTINCT user_id
+              FROM   classmate.dim_classmate_employee_profile
+              WHERE  manager IN (?,?) AND is_active=1 AND is_deleted=0 AND etl_isactive=1
+          )
+        GROUP BY vt.course_name
+        ORDER BY completion_count DESC
+        """,
+        (manager_id, uid),
+    )
+    return [
+        {
+            "course_name":      r["course_name"],
+            "completion_count": int(r["completion_count"]),
+            "category":         _classify(r["course_name"] or "") or "Other",
+        }
+        for r in rows
+    ]
+
+
+def _get_team_reco_courses(manager_id: int, uid: int) -> list:
+    """Top 20 team-completed courses the given user hasn't finished, with category."""
+    from services.skill_service import _classify
+    rows = query(
+        """
+        SELECT TOP 20 vt.course_name, COUNT(*) AS completion_count
+        FROM   classmate.vw_classmate_trainings vt
+        WHERE  vt.status = 4052
+          AND  vt.user_id IN (
+              SELECT DISTINCT user_id
+              FROM   classmate.dim_classmate_employee_profile
+              WHERE  manager IN (?,?) AND is_active=1 AND is_deleted=0 AND etl_isactive=1
+          )
+          AND  vt.course_name NOT IN (
+              SELECT DISTINCT course_name
+              FROM   classmate.vw_classmate_trainings
+              WHERE  user_id=? AND status=4052
+          )
+        GROUP BY vt.course_name
+        ORDER BY completion_count DESC
+        """,
+        (manager_id, uid, uid),
+    )
+    return [
+        {
+            "course_name":      r["course_name"],
+            "completion_count": int(r["completion_count"]),
+            "category":         _classify(r["course_name"] or "") or "Other",
+        }
+        for r in rows
+    ]
 
 
 def _get_inprogress(user_id: int) -> dict | None:
@@ -162,7 +350,7 @@ async def employee_dashboard(user: CurrentUser = Depends(get_current_user)):
             "week_map":      streak["week_map"],
             "learning_time": streak["learning_time"],
         },
-        "skills": skills,
+        "skills": {k: v for k, v in skills.items() if not k.startswith("_")},
         "continue_course": inprogress,
         "recommended": {
             **recommended,
@@ -185,17 +373,32 @@ async def employee_team(user: CurrentUser = Depends(get_current_user)):
         if manager_id is None:
             return {"accomplishments": [], "popular_courses": [], "highlights": {}}
 
-        accomplishments, popular_courses, highlights = await asyncio.gather(
+        accomplishments, top_courses, reco_courses, highlights, completions_delta, congrats_count = await asyncio.gather(
             _run(get_team_accomplishments, manager_id, 14, uid),
-            _run(get_team_course_popularity, manager_id),
+            _run(_get_team_top_courses, manager_id, uid),
+            _run(_get_team_reco_courses, manager_id, uid),
             _run(get_team_highlights, manager_id),
+            _run(_get_team_completions_delta, manager_id, uid),
+            _run(_get_team_congrats_week, manager_id),
         )
     except Exception as exc:
         logger.warning("Fabric unavailable for team uid=%s: %s", uid, exc)
         return _PLACEHOLDER_TEAM
 
+    # Most completed non-training course for the highlights banner
+    filtered_top = _filter_training_modules(top_courses)
+    top_course_name = filtered_top[0]["course_name"] if filtered_top else None
+
+    # Recommendations: team courses user hasn't done, training modules filtered out, top 4
+    filtered_reco = _filter_training_modules(reco_courses)
+    if not top_course_name and filtered_reco:
+        top_course_name = filtered_reco[0]["course_name"]
+
+    highlights["time_delta_pct"] = completions_delta
     return {
-        "accomplishments": accomplishments,
-        "popular_courses": popular_courses,
-        "highlights":      highlights,
+        "accomplishments":    accomplishments,
+        "popular_courses":    filtered_reco[:4],
+        "top_course":         top_course_name,
+        "highlights":         highlights,
+        "congrats_this_week": congrats_count,
     }

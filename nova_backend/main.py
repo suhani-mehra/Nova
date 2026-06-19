@@ -64,6 +64,11 @@ async def lifespan(app: FastAPI):
             loop.run_in_executor(None, _compute_quarterly_ai_proficiency)
         except Exception as exc:
             logger.warning("Could not schedule AI trend job: %s", exc)
+        try:
+            from routers.manager import _compute_dept_snapshot
+            loop.run_in_executor(None, _compute_dept_snapshot)
+        except Exception as exc:
+            logger.warning("Could not schedule dept snapshot job: %s", exc)
     except Exception as exc:
         logger.error("Fabric connection FAILED on startup: %s", exc)
         print(f"\n✗ Fabric connection FAILED: {exc}\n")
