@@ -3,223 +3,384 @@ services/skill_service.py
 Skill radar (5 categories) and AI proficiency scoring.
 """
 
+import logging
+import math
+import zlib
 from datetime import date, timedelta
+import re
 
 from core.database import query
 from core.config import settings
+
+logger = logging.getLogger(__name__)
 
 CATEGORY_KEYWORDS = {
     "AI": [
         "ai", "artificial intelligence", "machine learning", "ml", "genai",
         "gpt", "llm", "prompt", "openai", "anthropic", "neural", "nlp",
-        "generative", "agentic",
+        "generative", "agentic", "deep learning", "chatgpt", "copilot",
+        "ai-augment",
     ],
     "Cloud": [
         "azure", "aws", "gcp", "cloud", "kubernetes", "docker", "terraform",
-        "devops", "serverless", "snowflake",
+        "devops", "serverless", "snowflake", "infrastructure", "iaas", "paas",
+        "saas", "lakehouse",
     ],
     "Frontend": [
         "react", "angular", "vue", "javascript", "typescript", "css", "html",
-        "frontend", "ui", "ux", "power apps", "figma", "web",
+        "frontend", "ui", "ux", "power apps", "figma", "web", "accessibility",
+        "responsive", "ux design",
     ],
     "Backend": [
         "python", "java", "node", "fastapi", "spring", "api", "rest",
         "backend", "database", "sql", "mongodb", "postgresql", ".net", "c#",
+        "microservice", "graphql", "dotnet",
     ],
     "Data": [
         "data", "analytics", "power bi", "tableau", "pandas", "spark",
         "data science", "statistics", "bi", "reporting", "etl", "warehouse",
+        "databricks", "dax", "data engineering",
     ],
 }
 
 AXES = ["AI", "Cloud", "Frontend", "Backend", "Data"]
 
+# Square-root mastery threshold: raw score of 1000 maps to 100%.
+# ~14 dedicated courses averaging 70 per vertical = full proficiency.
+MASTERY_THRESHOLD = 1000.0
+
+
+def _lc_topic_id(topic: str) -> int:
+    """Stable integer key for an LC topic (matches course_scoring_service.lc_topic_id)."""
+    return zlib.crc32(topic.encode("utf-8", errors="replace")) & 0x7FFFFFFF
+
 
 def _classify(course_name: str) -> str | None:
+    """Keyword-based single-category classifier. Kept for recommendation_service.py catalogue filtering."""
     name_lower = course_name.lower()
     for cat, keywords in CATEGORY_KEYWORDS.items():
-        if any(kw in name_lower for kw in keywords):
-            return cat
+        for kw in keywords:
+            if len(kw) <= 3:
+                if re.search(r'\b' + re.escape(kw) + r'\b', name_lower):
+                    return cat
+            else:
+                if kw in name_lower:
+                    return cat
     return None
 
 
-def _credits_by_category(rows: list[dict]) -> dict[str, float]:
-    totals = {cat: 0.0 for cat in AXES}
-    for r in rows:
-        cat = _classify(r.get("course_name") or "")
-        if cat:
-            totals[cat] += float(r.get("learning_credits") or 0)
-    return totals
+def _keyword_scores(course_name: str) -> dict[str, int]:
+    """Return a 5-vertical score dict via keyword fallback: 70 for matched category, 0 for others."""
+    matched = _classify(course_name)
+    return {ax: (70 if ax == matched else 0) for ax in AXES}
 
 
 def calculate_skill_radar(user_id: int, conn=None) -> dict:
-    today = date.today()
-    first_this_month = today.replace(day=1)
-    first_last_month = (first_this_month - timedelta(days=1)).replace(day=1)
+    from nova_db.gpt_cache import get_cache, set_cache
+    from nova_db.course_scores import get_scores_for_items
 
-    completed_rows = query(
+    cached = get_cache(f"classify_{user_id}")
+    if cached:
+        logger.info("Cache hit for classify_%s", user_id)
+        return cached["result"]
+
+    completed = query(
         """
-        SELECT course_name, learning_credits, completed_on
+        SELECT second_level_category_id, course_name, completed_on
         FROM   classmate.vw_classmate_trainings
         WHERE  user_id = ?
           AND  status  = 4052
-          AND  completed_on >= ?
-        """,
-        (user_id, first_last_month),
-    )
-
-    this_month_rows = [
-        r for r in completed_rows
-        if r["completed_on"] and (
-            r["completed_on"].date() if hasattr(r["completed_on"], "date") else r["completed_on"]
-        ) >= first_this_month
-    ]
-    last_month_rows = [
-        r for r in completed_rows
-        if r["completed_on"] and (
-            r["completed_on"].date() if hasattr(r["completed_on"], "date") else r["completed_on"]
-        ) < first_this_month
-    ]
-
-    this_month_cat = _credits_by_category(this_month_rows)
-    last_month_cat = _credits_by_category(last_month_rows)
-
-    # Team average per category (teammates = same manager)
-    manager_rows = query(
-        """
-        SELECT manager
-        FROM   classmate.dim_classmate_employee_profile
-        WHERE  user_id    = ?
-          AND  is_deleted = 0
+        ORDER BY completed_on DESC
         """,
         (user_id,),
     )
-    manager_id = manager_rows[0]["manager"] if manager_rows else None
-
-    team_avg = {cat: 50.0 for cat in AXES}  # fallback: no normalisation
-    if manager_id:
-        team_rows = query(
-            """
-            SELECT vt.course_name, vt.learning_credits
-            FROM   classmate.vw_classmate_trainings vt
-            JOIN   classmate.dim_classmate_employee_profile ep ON ep.user_id = vt.user_id
-            WHERE  ep.manager    = ?
-              AND  ep.is_deleted = 0
-              AND  vt.status     = 4052
-              AND  vt.completed_on >= ?
-            """,
-            (manager_id, first_this_month),
-        )
-
-        team_user_ids = query(
-            """
-            SELECT user_id
-            FROM   classmate.dim_classmate_employee_profile
-            WHERE  manager    = ?
-              AND  is_deleted = 0
-            """,
-            (manager_id,),
-        )
-        team_count = max(len(team_user_ids), 1)
-
-        team_totals = _credits_by_category(team_rows)
-        team_avg = {cat: (team_totals[cat] / team_count) for cat in AXES}
-
-    def normalise(raw: float, avg: float) -> int:
-        if avg == 0:
-            return 50 if raw == 0 else 100
-        score = (raw / avg) * 50
-        return max(0, min(100, int(score)))
-
-    this_month = [normalise(this_month_cat[c], team_avg[c]) for c in AXES]
-    last_month = [normalise(last_month_cat[c], team_avg[c]) for c in AXES]
-
-    delta = int(sum(this_month[i] - last_month[i] for i in range(5)) / 5)
-
-    return {
-        "axes":       AXES,
-        "this_month": this_month,
-        "last_month": last_month,
-        "delta":      delta,
-    }
-
-
-def _ai_score_for_user(user_id: int) -> float:
-    """Raw (un-normalised) AI score: credits from AI courses + AI certs."""
-    course_rows = query(
+    certs = query(
         """
-        SELECT SUM(learning_credits) AS credits
-        FROM   classmate.vw_classmate_trainings
-        WHERE  user_id = ?
-          AND  status  = 4052
-        """,
-        (user_id,),
-    )
-    cert_rows = query(
-        """
-        SELECT SUM(dc.learning_credit_value) AS credits
+        SELECT fc.certificate_id,
+               dc.certificate_name AS course_name,
+               fc.completion_date  AS completed_on
         FROM   classmate.fact_classmate_certification fc
         JOIN   classmate.dim_classmate_certificate dc ON dc.id = fc.certificate_id
-        WHERE  fc.user_id    = ?
-          AND  fc.status     = 2
+        WHERE  fc.user_id   = ?
+          AND  fc.status    = 2
+          AND  fc.is_active = 1
           AND  fc.is_deleted = 0
+        ORDER BY fc.completion_date DESC
+        """,
+        (user_id,),
+    )
+    lc_items = query(
+        """
+        SELECT CASE WHEN self_study_id IS NOT NULL       THEN 'self_study'
+                    WHEN session_id IS NOT NULL           THEN 'session'
+                    WHEN recorded_training_id IS NOT NULL THEN 'recorded'
+               END AS item_type,
+               COALESCE(self_study_id, session_id, recorded_training_id) AS item_id,
+               topic AS course_name,
+               credit_date AS completed_on
+        FROM   classmate.fact_classmate_learning_credit
+        WHERE  user_id    = ?
+          AND  is_deleted = 0
+          AND  COALESCE(self_study_id, session_id, recorded_training_id) IS NOT NULL
+        ORDER BY credit_date DESC
         """,
         (user_id,),
     )
 
-    ai_course_credits = 0.0
-    if course_rows:
-        all_completed = query(
-            """
-            SELECT course_name, learning_credits
-            FROM   classmate.vw_classmate_trainings
-            WHERE  user_id = ?
-              AND  status  = 4052
-            """,
-            (user_id,),
-        )
-        ai_course_credits = sum(
-            float(r["learning_credits"] or 0)
-            for r in all_completed
-            if _classify(r.get("course_name") or "") == "AI"
-        )
+    empty_result = {
+        "axes":        AXES,
+        "this_month":  [0] * 5,
+        "last_month":  [0] * 5,
+        "delta":       0,
+        "scored_by":   "gpt",
+        "_raw_scores": {ax: 0.0 for ax in AXES},
+    }
+    if not completed and not certs and not lc_items:
+        set_cache(f"classify_{user_id}", empty_result, "gpt", ttl_hours=24)
+        return empty_result
 
-    ai_cert_credits = float(cert_rows[0]["credits"] or 0) if cert_rows else 0.0
-    return ai_course_credits + ai_cert_credits
+    # Build lookup pairs and item list
+    lookup_pairs: list[tuple[str, int]] = []
+    items: list[dict] = []
+    for r in completed:
+        cat_id = r["second_level_category_id"]
+        name   = r["course_name"] or ""
+        co     = r["completed_on"]
+        items.append({"type": "course", "cat_id": cat_id, "name": name, "completed_on": co})
+        if cat_id:
+            lookup_pairs.append(("course", int(cat_id)))
+    for r in certs:
+        cert_id = r["certificate_id"]
+        name    = r["course_name"] or ""
+        co      = r["completed_on"]
+        items.append({"type": "cert", "cert_id": cert_id, "name": name, "completed_on": co})
+        if cert_id:
+            lookup_pairs.append(("cert", int(cert_id)))
+    seen_lc_topics: set[int] = set()
+    for r in lc_items:
+        name = r["course_name"] or ""
+        co   = r["completed_on"]
+        if not name:
+            continue
+        tid = _lc_topic_id(name)
+        if tid in seen_lc_topics:
+            continue  # deduplicate by topic per employee
+        seen_lc_topics.add(tid)
+        items.append({"type": "lc", "lc_id": tid, "name": name, "completed_on": co})
+        lookup_pairs.append(("lc", tid))
+
+    score_map = get_scores_for_items(list(set(lookup_pairs)))
+
+    today         = date.today()
+    cutoff_this   = today - timedelta(days=365)
+    cutoff_last   = today - timedelta(days=730)
+
+    all_raw  = {ax: 0.0 for ax in AXES}
+    this_raw = {ax: 0.0 for ax in AXES}
+    last_raw = {ax: 0.0 for ax in AXES}
+
+    for item in items:
+        co = item["completed_on"]
+        if co is None:
+            continue
+        co_date = co.date() if hasattr(co, "date") else co
+
+        # Look up pre-scored vertical scores from SQLite
+        if item["type"] == "course" and item.get("cat_id"):
+            sc = score_map.get(("course", int(item["cat_id"])))
+        elif item["type"] == "cert" and item.get("cert_id"):
+            sc = score_map.get(("cert", int(item["cert_id"])))
+        elif item["type"] == "lc" and item.get("lc_id"):
+            sc = score_map.get(("lc", int(item["lc_id"])))
+        else:
+            sc = None
+
+        if sc is None:
+            sc = _keyword_scores(item["name"])
+
+        for ax in AXES:
+            v = float(sc.get(ax, 0))
+            all_raw[ax] += v
+            if co_date >= cutoff_this:
+                this_raw[ax] += v
+            elif co_date >= cutoff_last:
+                last_raw[ax] += v
+
+    this_norm = {ax: round(min(100.0, math.sqrt(all_raw[ax] / MASTERY_THRESHOLD) * 100), 1) for ax in AXES}
+    last_norm = {ax: round(min(100.0, math.sqrt(last_raw[ax] / MASTERY_THRESHOLD) * 100), 1) for ax in AXES}
+
+    delta = round(sum(this_norm[AXES[i]] - last_norm[AXES[i]] for i in range(5)) / 5)
+
+    result = {
+        "axes":        AXES,
+        "this_month":  [this_norm[ax] for ax in AXES],
+        "last_month":  [last_norm[ax] for ax in AXES],
+        "delta":       delta,
+        "scored_by":   "gpt",
+        "_raw_scores": all_raw,
+    }
+    set_cache(f"classify_{user_id}", result, "gpt", ttl_hours=24)
+    return result
+
+
+def get_team_skill_scores(user_ids: list[int]) -> dict:
+    from nova_db.gpt_cache import get_cache, set_cache
+    from nova_db.course_scores import get_scores_for_items
+
+    if not user_ids:
+        return {}
+
+    cached_results: dict[int, dict] = {}
+    uncached_uids: list[int] = []
+    for uid in user_ids:
+        c = get_cache(f"classify_{uid}")
+        if c:
+            cached_results[uid] = c["result"]
+        else:
+            uncached_uids.append(uid)
+
+    raw_scores: dict[int, dict[str, float]] = {}
+
+    if uncached_uids:
+        ph = ",".join("?" * len(uncached_uids))
+        try:
+            course_rows = query(
+                f"""
+                SELECT user_id, second_level_category_id, course_name, completed_on
+                FROM classmate.vw_classmate_trainings
+                WHERE user_id IN ({ph}) AND status = 4052
+                """,
+                tuple(uncached_uids),
+            )
+        except Exception as exc:
+            logger.warning("get_team_skill_scores courses failed: %s", exc)
+            course_rows = []
+        try:
+            cert_rows = query(
+                f"""
+                SELECT fc.user_id,
+                       fc.certificate_id,
+                       dc.certificate_name AS course_name,
+                       fc.completion_date  AS completed_on
+                FROM classmate.fact_classmate_certification fc
+                JOIN classmate.dim_classmate_certificate dc ON dc.id = fc.certificate_id
+                WHERE fc.user_id IN ({ph}) AND fc.status = 2
+                  AND fc.is_active = 1 AND fc.is_deleted = 0
+                """,
+                tuple(uncached_uids),
+            )
+        except Exception as exc:
+            logger.warning("get_team_skill_scores certs failed: %s", exc)
+            cert_rows = []
+        try:
+            lc_rows = query(
+                f"""
+                SELECT user_id,
+                       CASE WHEN self_study_id IS NOT NULL       THEN 'self_study'
+                            WHEN session_id IS NOT NULL           THEN 'session'
+                            WHEN recorded_training_id IS NOT NULL THEN 'recorded'
+                       END AS item_type,
+                       COALESCE(self_study_id, session_id, recorded_training_id) AS item_id,
+                       topic AS course_name,
+                       credit_date AS completed_on
+                FROM classmate.fact_classmate_learning_credit
+                WHERE user_id IN ({ph}) AND is_deleted=0
+                  AND COALESCE(self_study_id, session_id, recorded_training_id) IS NOT NULL
+                """,
+                tuple(uncached_uids),
+            )
+        except Exception as exc:
+            logger.warning("get_team_skill_scores LC failed: %s", exc)
+            lc_rows = []
+
+        # Collect all unique (type, id) pairs across all users for a single batch SQLite lookup
+        lookup_pairs: set[tuple[str, int]] = set()
+        uid_items: dict[int, list[dict]] = {uid: [] for uid in uncached_uids}
+
+        for r in course_rows:
+            uid = r["user_id"]
+            cat_id = r["second_level_category_id"]
+            name   = r["course_name"] or ""
+            co     = r["completed_on"]
+            uid_items[uid].append({"type": "course", "cat_id": cat_id, "name": name, "completed_on": co})
+            if cat_id:
+                lookup_pairs.add(("course", int(cat_id)))
+        for r in cert_rows:
+            uid = r["user_id"]
+            cert_id = r["certificate_id"]
+            name    = r["course_name"] or ""
+            co      = r["completed_on"]
+            uid_items[uid].append({"type": "cert", "cert_id": cert_id, "name": name, "completed_on": co})
+            if cert_id:
+                lookup_pairs.add(("cert", int(cert_id)))
+        for r in lc_rows:
+            uid  = r["user_id"]
+            name = r["course_name"] or ""
+            co   = r["completed_on"]
+            if not name:
+                continue
+            tid = _lc_topic_id(name)
+            uid_items[uid].append({"type": "lc", "lc_id": tid, "name": name, "completed_on": co})
+            lookup_pairs.add(("lc", tid))
+
+        score_map = get_scores_for_items(list(lookup_pairs))
+
+        for uid in uncached_uids:
+            ur = {ax: 0.0 for ax in AXES}
+            seen_lc: set[int] = set()
+            for item in uid_items[uid]:
+                if item["type"] == "course" and item.get("cat_id"):
+                    sc = score_map.get(("course", int(item["cat_id"])))
+                elif item["type"] == "cert" and item.get("cert_id"):
+                    sc = score_map.get(("cert", int(item["cert_id"])))
+                elif item["type"] == "lc" and item.get("lc_id"):
+                    tid = int(item["lc_id"])
+                    if tid in seen_lc:
+                        continue
+                    seen_lc.add(tid)
+                    sc = score_map.get(("lc", tid))
+                else:
+                    sc = None
+                if sc is None:
+                    sc = _keyword_scores(item["name"])
+                for ax in AXES:
+                    ur[ax] += float(sc.get(ax, 0))
+
+            raw_scores[uid] = ur
+            cache_entry = {
+                "axes":        AXES,
+                "this_month":  [round(min(100.0, math.sqrt(ur[ax] / MASTERY_THRESHOLD) * 100), 1) for ax in AXES],
+                "last_month":  [0] * 5,
+                "delta":       0,
+                "scored_by":   "gpt",
+                "_raw_scores": ur,
+            }
+            set_cache(f"classify_{uid}", cache_entry, "gpt", ttl_hours=24)
+
+    for uid, cached in cached_results.items():
+        raw_scores[uid] = cached.get("_raw_scores", {ax: 0.0 for ax in AXES})
+
+    all_uids = list(user_ids)
+    result: dict[int, dict] = {}
+    for uid in all_uids:
+        ur = raw_scores.get(uid, {ax: 0.0 for ax in AXES})
+        normed: dict[str, float] = {}
+        for ax in AXES:
+            normed[ax] = round(min(100.0, math.sqrt(ur[ax] / MASTERY_THRESHOLD) * 100), 1)
+        normed["_scored_by"] = cached_results.get(uid, {}).get("scored_by", "gpt")
+        result[uid] = normed
+
+    return result
 
 
 def calculate_ai_proficiency(user_id: int, conn=None) -> float:
-    """Returns normalised AI proficiency score 0-100 for a single user."""
-    all_user_rows = query(
-        """
-        SELECT DISTINCT user_id
-        FROM   classmate.dim_classmate_employee_profile
-        WHERE  is_active  = 1
-          AND  is_deleted = 0
-        """,
-    )
-    all_uids = [r["user_id"] for r in all_user_rows]
-
-    user_raw = _ai_score_for_user(user_id)
-    if not all_uids:
-        return 0.0
-
-    # Only compute max against a sample to avoid N+1 explosion in single-user calls
-    # For single-user call we compute just this user's score relative to a cached max
-    # Full normalisation happens in get_team_ai_proficiency
-    all_scores = [_ai_score_for_user(uid) for uid in all_uids]
-    max_score = max(all_scores) if all_scores else 1.0
-    if max_score == 0:
-        return 0.0
-    return round(user_raw / max_score * 100, 1)
+    radar = calculate_skill_radar(user_id)
+    ai_idx = AXES.index("AI")
+    return round(float(radar["this_month"][ai_idx]), 1)
 
 
 def get_team_ai_proficiency(manager_user_id: int, conn=None) -> dict:
-    """Returns count and % of direct reports who are AI proficient.
-
-    Uses two batch queries (direct reports + their credits) instead of N+1
-    per-user calls to _ai_score_for_user.
-    """
+    """Returns count and % of direct reports who are AI proficient."""
     reports = query(
         """
         SELECT DISTINCT user_id
@@ -234,28 +395,13 @@ def get_team_ai_proficiency(manager_user_id: int, conn=None) -> dict:
         return {"count": 0, "pct": 0.0, "total": 0}
 
     uids = [r["user_id"] for r in reports]
-    placeholders = ",".join("?" * len(uids))
-
-    # One query: total completed learning credits per team member
-    credit_rows = query(
-        f"""
-        SELECT user_id, SUM(learning_credits) AS total_credits
-        FROM   classmate.vw_classmate_trainings
-        WHERE  user_id IN ({placeholders})
-          AND  status   = 4052
-        GROUP BY user_id
-        """,
-        tuple(uids),
-    )
-    uid_credits = {r["user_id"]: float(r["total_credits"] or 0) for r in credit_rows}
-    max_credits = max(uid_credits.values()) if uid_credits else 0.0
-    if max_credits == 0:
-        return {"count": 0, "pct": 0.0, "total": len(uids)}
-
+    team_scores = get_team_skill_scores(uids)
+    ai_idx = AXES.index("AI")
     threshold = settings.ai_proficiency_min_score
+
     proficient = sum(
         1 for uid in uids
-        if (uid_credits.get(uid, 0.0) / max_credits * 100) >= threshold
+        if team_scores.get(uid, {}).get("AI", 0.0) >= threshold
     )
     total = len(uids)
     return {

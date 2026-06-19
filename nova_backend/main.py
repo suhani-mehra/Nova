@@ -38,11 +38,32 @@ def _test_fabric_connection():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_congrats_db()
+    from nova_db.gpt_cache import init_cache, clear_expired
+    init_cache()
+    clear_expired()
+    logger.info("GPT cache initialised")
+    from nova_db.course_scores import init_course_scores_table
+    init_course_scores_table()
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, _test_fabric_connection)
         logger.info("Fabric connection OK")
         print("\n✓ Fabric connection OK\n")
+        try:
+            from routers.manager import _init_exec_users
+            loop.run_in_executor(None, _init_exec_users)
+        except Exception as exc:
+            logger.warning("Could not schedule exec user lookup: %s", exc)
+        try:
+            from services.course_scoring_service import score_all_courses
+            loop.run_in_executor(None, score_all_courses)
+        except Exception as exc:
+            logger.warning("Could not schedule course scoring job: %s", exc)
+        try:
+            from routers.manager import _compute_quarterly_ai_proficiency
+            loop.run_in_executor(None, _compute_quarterly_ai_proficiency)
+        except Exception as exc:
+            logger.warning("Could not schedule AI trend job: %s", exc)
     except Exception as exc:
         logger.error("Fabric connection FAILED on startup: %s", exc)
         print(f"\n✗ Fabric connection FAILED: {exc}\n")

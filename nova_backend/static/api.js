@@ -54,7 +54,9 @@ function mapDashboard(data) {
       thisMonth: data.skills.this_month,
       lastMonth: data.skills.last_month,
       delta:     data.skills.delta,
+      scoredBy:  data.skills.scored_by || 'keywords',
     },
+    tierScoredBy:   data.tier?.scored_by || 'keywords',
     badges: data.badges,
     continueCourse: data.continue_course ? {
       name:     data.continue_course.name,
@@ -64,9 +66,10 @@ function mapDashboard(data) {
       tile:     ['#A634FF', '#5400DC'],
     } : null,
     recommended: data.recommended ? {
-      name: data.recommended.course_name,
-      meta: data.recommended.reason,
-      tile: ['#2ACCFF', '#5400DC'],
+      name:     data.recommended.course_name,
+      meta:     data.recommended.reason,
+      tile:     ['#2ACCFF', '#5400DC'],
+      scoredBy: data.recommended.scored_by || 'keywords',
     } : null,
   };
 }
@@ -155,15 +158,19 @@ function mapManager(data, teamsData, peopleData) {
       };
     }),
     people: peopleData.employees.map(e => ({
-      name:   e.name,
-      role:   e.department,
-      team:   e.department,
-      tier:   e.tier,
-      prof:   Math.round(e.ai_proficiency),
-      trend:  '+0%',
-      dir:    e.status === 'thriving' ? 'up' : e.status === 'at_risk' ? 'down' : 'flat',
-      status: e.status === 'thriving' ? 'ok'  : e.status === 'at_risk' ? 'risk' : 'warn',
-      av:     ['#A634FF', '#FF4398'],
+      user_id:    e.user_id,
+      name:       e.name,
+      role:       e.department,
+      team:       e.department,
+      department: e.department,
+      designation: e.designation || '',
+      tier:       e.tier,
+      prof:       Math.round(e.ai_proficiency),
+      trend:      '+0%',
+      dir:        e.status === 'thriving' ? 'up' : e.status === 'at_risk' ? 'down' : 'flat',
+      status:     e.status === 'thriving' ? 'ok'  : e.status === 'at_risk' ? 'risk' : 'warn',
+      av:         ['#A634FF', '#FF4398'],
+      scoredBy:   e.scored_by || 'keywords',
     })),
   };
 }

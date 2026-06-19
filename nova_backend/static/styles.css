@@ -349,3 +349,23 @@ body.glow-vivid{
   .team-row,.team-head{grid-template-columns:1fr auto}
   .ppl-head,.ppl-row{grid-template-columns:1.6fr auto}
 }
+
+/* ── People search ─────────────────────────── */
+.people-search-wrap {
+  position: relative;
+  max-width: 420px;
+  margin-bottom: 16px;
+}
+.people-search-wrap input:focus {
+  border-color: var(--purple);
+  box-shadow: 0 0 0 3px rgba(166,52,255,.1);
+}
+.search-result-note {
+  padding: 8px 16px 0;
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.search-result-note b {
+  color: var(--purple);
+}

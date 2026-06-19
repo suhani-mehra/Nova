@@ -155,6 +155,7 @@ async def employee_dashboard(user: CurrentUser = Depends(get_current_user)):
             "progress":      tier["tier_progress"],
             "percentile":    tier["percentile"],
             "total_credits": tier["total_credits"],
+            "scored_by":     tier.get("scored_by", "keywords"),
         },
         "streak": {
             "current":       streak["current_streak"],
@@ -163,8 +164,11 @@ async def employee_dashboard(user: CurrentUser = Depends(get_current_user)):
         },
         "skills": skills,
         "continue_course": inprogress,
-        "recommended":     recommended,
-        "badges":          [],
+        "recommended": {
+            **recommended,
+            "scored_by": recommended.get("scored_by", "keywords"),
+        },
+        "badges": [],
     }
 
 
