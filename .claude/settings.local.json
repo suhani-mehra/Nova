@@ -31,7 +31,12 @@
       "Bash(curl -s http://localhost:8000/data.js)",
       "Bash(curl -s http://localhost:8000/app.jsx)",
       "Bash(curl -s http://localhost:8000/api/auth/token)",
-      "Bash(curl -s http://localhost:8000/api/auth/me)"
+      "Bash(curl -s http://localhost:8000/api/auth/me)",
+      "Bash(python3 -m py_compile core/queries.py services/team_service.py)",
+      "Bash(git add *)",
+      "Bash(git rm *)",
+      "Bash(python3 -c ' *)",
+      "mcp__Claude_Preview__preview_start"
     ]
   }
 }
