@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@azure/msal-browser": "^3.26.1",
     "@fortawesome/free-solid-svg-icons": "^7.2.0",
     "@fortawesome/react-fontawesome": "^3.3.1"
   }

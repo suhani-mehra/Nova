@@ -45,7 +45,7 @@ function ProfileMenu({account, onSwitch}){
           h('span',{className:`role-chip ${badgeCls}`,style:{marginTop:6}}, badgeLabel))),
       h('div',{className:'sep'}),
       h('button',{className:'menu-item'}, h('span',{className:'ic'},Icons.settings({size:17})),'Account settings'),
-      h('button',{className:'menu-item'}, h('span',{className:'ic'},Icons.logout({size:17})),'Sign out'),
+      h('button',{className:'menu-item', onClick:()=>typeof novaSignOut === 'function' && novaSignOut()}, h('span',{className:'ic'},Icons.logout({size:17})),'Sign out'),
       otherA && h(React.Fragment,null,
         h('div',{className:'sep'}),
         h('div',{className:'demo-note'},'Switch view'),
@@ -69,6 +69,90 @@ const TABS = {
   ],
 };
 
+function getTabsForRole(role) {
+  if (role === 'both' || role === 'manager') return [...TABS.employee, ...TABS.manager];
+  return TABS.employee;
+}
+
+const EXEC_DEV_IDS = new Set([16467, 16465, 16470]);
+
+function ExecDevPanel({ myId }) {
+  const myIdNum = myId ? parseInt(myId, 10) : null;
+
+  const currentTarget = sessionStorage.getItem('nova_impersonate_id');
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false);
+  const debounceRef = useRef(null);
+  const panelRef = useRef(null);
+
+  useEffect(() => {
+    const handler = e => {
+      if (panelRef.current && !panelRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const search = (q) => {
+    setQuery(q);
+    clearTimeout(debounceRef.current);
+    if (!q.trim()) { setResults([]); setOpen(false); return; }
+    debounceRef.current = setTimeout(async () => {
+      setLoading(true);
+      const data = await apiGet('/api/manager/people/search?q=' + encodeURIComponent(q));
+      setLoading(false);
+      if (data && data.employees) {
+        setResults(data.employees.slice(0, 8));
+        setOpen(true);
+      }
+    }, 250);
+  };
+
+  const switchTo = (emp) => {
+    sessionStorage.setItem('nova_impersonate_id', String(emp.user_id));
+    setOpen(false);
+    setQuery('');
+    window.location.reload();
+  };
+
+  const clear = () => {
+    sessionStorage.removeItem('nova_impersonate_id');
+    window.location.reload();
+  };
+
+  if (!EXEC_DEV_IDS.has(myIdNum)) return null;
+
+  return h('div', { className: 'exec-dev-panel' + (currentTarget ? ' active' : ''), ref: panelRef },
+    h('span', { className: 'exec-dev-label' }, '⚡'),
+    currentTarget && h('span', { className: 'exec-dev-viewing' }, `User ${currentTarget}`),
+    h('div', { className: 'exec-dev-search' },
+      h('input', {
+        type: 'text',
+        placeholder: currentTarget ? 'Switch to…' : 'Search name…',
+        value: query,
+        onChange: e => search(e.target.value),
+        onFocus: () => results.length && setOpen(true),
+      }),
+      loading && h('span', { className: 'exec-dev-spinner' }, '…'),
+      open && results.length > 0 && h('div', { className: 'exec-dev-dropdown' },
+        results.map(emp =>
+          h('div', {
+            key: emp.user_id,
+            className: 'exec-dev-result',
+            onMouseDown: () => switchTo(emp),
+          },
+            h('span', { className: 'exec-dev-result-name' }, emp.name),
+            h('span', { className: 'exec-dev-result-meta' }, emp.department || emp.designation || `#${emp.user_id}`)
+          )
+        )
+      )
+    ),
+    currentTarget && h('button', { className: 'exec-dev-clear', onClick: clear }, '✕')
+  );
+}
+
 function TopKPI({account}){
   if(account==='employee') return null;
   return h('div',{className:'kpi-pill'},
@@ -84,8 +168,9 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 
 function App(){
   const initKind = (NOVA.accounts.current && NOVA.accounts.current.kind) || 'employee';
+  const initRole = NOVA.accounts.role || initKind;
   const [account,setAccount]=useState(initKind);
-  const [tab,setTab]=useState((TABS[initKind]||TABS.employee)[0].id);
+  const [tab,setTab]=useState(getTabsForRole(initRole)[0].id);
   const [t,setTweak]=useTweaks(TWEAK_DEFAULTS);
   const [,forceUpdate]=useState(0);
 
@@ -115,10 +200,11 @@ function App(){
   };
 
   const render=()=>{
-    if(account==='employee'){
-      return tab==='progress' ? h(MyProgress) : h(MyTeam);
-    }
-    return tab==='overview' ? h(MgrOverview) : tab==='teams' ? h(MgrTeams) : h(MgrPeople);
+    if (tab === 'progress') return h(MyProgress);
+    if (tab === 'team') return h(MyTeam);
+    if (tab === 'overview') return h(MgrOverview);
+    if (tab === 'teams') return h(MgrTeams);
+    return h(MgrPeople);
   };
 
   const tabs = TABS[account] || TABS.employee;
@@ -149,17 +235,94 @@ function App(){
         onChange:v=>setTweak('glow',v)}),
       h(TweakRadio,{label:'Corners', value:t.corners, options:['sharp','soft','rounded'],
         onChange:v=>setTweak('corners',v)})
+    ),
+    h(ExecDevPanel, { myId: sessionStorage.getItem('nova_dev_uid') || null })
+  );
+}
+
+function LoadingScreen() {
+  return h('div', { className: 'nova-fullscreen-state' },
+    h('div', { className: 'nova-state-card' },
+      h(LogoMark),
+      h('div', { className: 'nova-state-title' }, 'Loading your data…'),
+      h('div', { className: 'nova-state-sub' }, 'Connecting to Classmate'),
+      h('div', { className: 'nova-spinner' })
     )
   );
 }
 
-(async function() {
-  if (window.__novaDataReady) {
-    await Promise.race([
-      window.__novaDataReady,
-      new Promise(function(resolve) { setTimeout(resolve, 10000); }),
-    ]);
-  }
-  ReactDOM.createRoot(document.getElementById('root')).render(h(App));
-  document.getElementById('nova-loading').style.display = 'none';
-})();
+function ErrorScreen() {
+  const retry = () => window.location.reload();
+  return h('div', { className: 'nova-fullscreen-state' },
+    h('div', { className: 'nova-state-card' },
+      h(LogoMark),
+      h('div', { className: 'nova-state-title' }, 'Could not load data'),
+      h('div', { className: 'nova-state-sub' }, 'Could not connect to the server. Try again in a moment.'),
+      h('button', { className: 'nova-state-retry', onClick: retry }, 'Retry')
+    )
+  );
+}
+
+function SignInPageGate() {
+  return h(SignInPage, {
+    onSignIn: async () => {
+      await novaSignIn();
+      window.location.reload();
+    },
+    onDevSignIn: (uid) => {
+      sessionStorage.setItem('nova_dev_uid', String(uid));
+      window.location.reload();
+    },
+  });
+}
+
+// True only when every NOVA data field required for the signed-in role is populated.
+function novaDataComplete() {
+  const acc = window.NOVA && window.NOVA.accounts;
+  if (!acc || !acc.current) return false;
+  const role = acc.role;
+  if (role === 'manager') return !!window.NOVA.manager;
+  if (role === 'both')    return !!(window.NOVA.employee && window.NOVA.team && window.NOVA.manager);
+  // employee (default)
+  return !!(window.NOVA.employee && window.NOVA.team);
+}
+
+function AppRoot() {
+  const [phase, setPhase] = useState('loading'); // 'loading' | 'ready' | 'error' | 'signin'
+
+  useEffect(() => {
+    const msalAccount = (typeof msal !== 'undefined' && typeof novaGetAccount === 'function')
+      ? novaGetAccount() : null;
+    const devUid = sessionStorage.getItem('nova_dev_uid');
+
+    if (!msalAccount && !devUid) {
+      setPhase('signin');
+      return;
+    }
+
+    // Wait for the real data-ready signal — initNova() always resolves
+    // __novaDataReady when it finishes (success or caught error). Whenever it
+    // resolves, decide ready vs. error based on whether the data actually loaded.
+    // The timeout is only a safety net for a genuinely hung request (e.g. the
+    // backend never responds at all), so it's generous.
+    let settled = false;
+    window.__novaDataReady.then(() => {
+      if (settled) return;
+      settled = true;
+      setPhase(novaDataComplete() ? 'ready' : 'error');
+    });
+    setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      setPhase(novaDataComplete() ? 'ready' : 'error');
+    }, 120000); // 2 min hard cap
+  }, []);
+
+  if (phase === 'loading') return h(LoadingScreen);
+  if (phase === 'signin') return h(SignInPageGate);
+  if (phase === 'error') return h(ErrorScreen);
+  return h(App);
+}
+
+document.getElementById('nova-loading').style.display = 'none';
+ReactDOM.createRoot(document.getElementById('root')).render(h(AppRoot));

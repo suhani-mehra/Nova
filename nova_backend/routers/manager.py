@@ -12,7 +12,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from core.auth import CurrentUser, get_current_user
 from core.database import query as _query
@@ -30,7 +30,7 @@ _dept_snapshot_computing = False  # guard against concurrent dept snapshot recom
 
 # ── Exec access sets ──────────────────────────────────────────────────────────
 
-EXEC_USER_IDS: set[int] = {5575}
+EXEC_USER_IDS: set[int] = {5575, 16467, 16465, 16470}  # hardcoded + DB-resolved
 EXEC_USER_NAMES = [
     "suhani mehra",
     "niva nimesh shah",
@@ -929,52 +929,8 @@ def _search_direct_reports(mgr_id: int, q: str) -> list:
 
 
 def _search_recursive(mgr_id: int, q: str) -> list:
-    rows = _query(
-        """
-        WITH latest_profiles AS (
-            SELECT *,
-                ROW_NUMBER() OVER (
-                    PARTITION BY user_id
-                    ORDER BY modified_on DESC
-                ) AS rn
-            FROM classmate.dim_classmate_employee_profile
-            WHERE etl_isactive = 1
-              AND is_active    = 1
-              AND is_deleted   = 0
-        ),
-        deduped AS (
-            SELECT * FROM latest_profiles WHERE rn = 1
-        ),
-        org_tree AS (
-            SELECT user_id,
-                   LOWER(TRIM(display_name))     AS name,
-                   LOWER(TRIM(department_code))  AS department,
-                   LOWER(TRIM(designation_code)) AS designation,
-                   manager,
-                   1 AS depth
-            FROM deduped
-            WHERE manager = ?
-            UNION ALL
-            SELECT d.user_id,
-                   LOWER(TRIM(d.display_name)),
-                   LOWER(TRIM(d.department_code)),
-                   LOWER(TRIM(d.designation_code)),
-                   d.manager,
-                   t.depth + 1
-            FROM deduped d
-            JOIN org_tree t ON d.manager = t.user_id
-            WHERE t.depth < 10
-        )
-        SELECT DISTINCT user_id, name, department, designation
-        FROM org_tree
-        """,
-        (mgr_id,),
-    )
-    for r in rows:
-        for f in ("name", "department", "designation"):
-            if r.get(f):
-                r[f] = r[f].title()
-    return _fuzzy_filter(rows, q)
+    # Synapse SQL does not support recursive CTEs — fall back to company-wide search.
+    return _search_company_wide(q)
 
 
 def _search_company_wide(q: str) -> list:
@@ -1069,7 +1025,7 @@ def _enrich_search_results(uids: list, rows: list) -> list:
 async def manager_overview(user: CurrentUser = Depends(get_current_user)):
     _require_manager(user)
     if user.classmate_user_id is None:
-        return _PLACEHOLDER_OVERVIEW
+        raise HTTPException(status_code=503, detail="No user identity")
 
     global _trend_computing
     mgr_id = user.classmate_user_id
@@ -1121,7 +1077,7 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
 
     except Exception as exc:
         logger.warning("Fabric unavailable for manager overview uid=%s: %s", mgr_id, exc)
-        return _PLACEHOLDER_OVERVIEW
+        raise HTTPException(status_code=503, detail="Data unavailable")
 
     return {
         "kpis": {
@@ -1148,7 +1104,7 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
 async def manager_teams(user: CurrentUser = Depends(get_current_user)):
     _require_manager(user)
     if user.classmate_user_id is None:
-        return _PLACEHOLDER_TEAMS
+        raise HTTPException(status_code=503, detail="No user identity")
 
     global _dept_snapshot_computing
     try:
@@ -1179,7 +1135,7 @@ async def manager_teams(user: CurrentUser = Depends(get_current_user)):
 
     except Exception as exc:
         logger.warning("Fabric unavailable for manager teams: %s", exc)
-        return _PLACEHOLDER_TEAMS
+        raise HTTPException(status_code=503, detail="Data unavailable")
 
     return {"departments": departments}
 
@@ -1318,28 +1274,35 @@ async def manager_people(
 ):
     _require_manager(user)
     if user.classmate_user_id is None:
-        return _PLACEHOLDER_PEOPLE
+        raise HTTPException(status_code=503, detail="No user identity")
 
     mgr_id = user.classmate_user_id
     try:
         employees = await _run(_build_people_list, mgr_id, filter)
     except Exception as exc:
         logger.warning("Fabric unavailable for manager people uid=%s: %s", mgr_id, exc)
-        return _PLACEHOLDER_PEOPLE
+        raise HTTPException(status_code=503, detail="Data unavailable")
 
     return {"employees": employees}
 
 
 @router.get("/manager/people/search")
 async def manager_people_search(
+    request: Request,
     q: str = Query("", min_length=0, max_length=100),
     user: CurrentUser = Depends(get_current_user),
 ):
-    _require_manager(user)
+    # When impersonating, get_current_user returns the impersonated user's identity.
+    # Read X-Nova-Dev-User directly so the exec's identity is used for auth checks.
+    dev_header = request.headers.get("X-Nova-Dev-User")
+    signed_in_uid = int(dev_header) if dev_header and dev_header.isdigit() else user.classmate_user_id
+
+    if signed_in_uid not in EXEC_USER_IDS:
+        _require_manager(user)
     if not q or not q.strip():
         return {"employees": [], "search_scope": "none"}
 
-    uid     = user.classmate_user_id
+    uid     = signed_in_uid
     q_lower = q.strip().lower()
 
     if uid is None:

@@ -5,14 +5,16 @@ Employee-facing endpoints: /api/employee/dashboard and /api/employee/team.
 
 import asyncio
 import logging
+import random
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from core.auth import CurrentUser, get_current_user
 from core.database import query
+from nova_db.badges import get_user_badges
 from services.tier_service import calculate_tier
 from services.streak_service import calculate_streak
 from services.skill_service import calculate_skill_radar
@@ -275,6 +277,47 @@ def _get_team_reco_courses(manager_id: int, uid: int) -> list:
     ]
 
 
+def _get_fallback_reco_courses(uid: int) -> list:
+    """Random Classmate-visible courses biased to the user's own learning — used when
+    the team has no (non-ISO) completed courses to recommend yet."""
+    from services.skill_service import _classify
+    rows = query(
+        """
+        SELECT DISTINCT sc.id, sc.name
+        FROM classmate.dim_classmate_second_level_category sc
+        JOIN classmate.dim_classmate_content_mapping cm
+          ON cm.second_level_category_id = sc.id AND cm.is_deleted = 0
+        WHERE sc.etl_isactive=1 AND sc.is_active=1 AND sc.is_deleted=0 AND sc.is_private=0
+          AND sc.id NOT IN (
+              SELECT second_level_category_id FROM classmate.vw_classmate_trainings
+              WHERE user_id=? AND status=4052
+          )
+        """,
+        (uid,),
+    )
+    catalogue = [{"course_name": r["name"]} for r in rows
+                 if r["name"] and not _is_training_module_by_name(r["name"])]
+    # Bias toward categories the user has completed / is currently studying.
+    hist = query(
+        "SELECT DISTINCT course_name FROM classmate.vw_classmate_trainings "
+        "WHERE user_id=? AND status IN (4052,4035)",
+        (uid,),
+    )
+    known = {_classify(h["course_name"] or "") for h in hist}
+    known.discard(None)
+    preferred = [c for c in catalogue if _classify(c["course_name"]) in known]
+    pool = preferred or catalogue
+    random.shuffle(pool)
+    return [
+        {
+            "course_name":      c["course_name"],
+            "completion_count": 0,
+            "category":         _classify(c["course_name"]) or "Other",
+        }
+        for c in pool[:4]
+    ]
+
+
 def _get_inprogress(user_id: int) -> dict | None:
     rows = query(
         """
@@ -321,7 +364,7 @@ def _get_manager_id(user_id: int) -> int | None:
 @router.get("/employee/dashboard")
 async def employee_dashboard(user: CurrentUser = Depends(get_current_user)):
     if user.classmate_user_id is None:
-        return _PLACEHOLDER_DASHBOARD
+        raise HTTPException(status_code=503, detail="No user identity")
 
     uid = user.classmate_user_id
     try:
@@ -334,7 +377,7 @@ async def employee_dashboard(user: CurrentUser = Depends(get_current_user)):
         )
     except Exception as exc:
         logger.warning("Fabric unavailable for dashboard uid=%s: %s", uid, exc)
-        return _PLACEHOLDER_DASHBOARD
+        raise HTTPException(status_code=503, detail="Data unavailable")
 
     return {
         "tier": {
@@ -356,14 +399,14 @@ async def employee_dashboard(user: CurrentUser = Depends(get_current_user)):
             **recommended,
             "scored_by": recommended.get("scored_by", "keywords"),
         },
-        "badges": [],
+        "badges": get_user_badges(uid),
     }
 
 
 @router.get("/employee/team")
 async def employee_team(user: CurrentUser = Depends(get_current_user)):
     if user.classmate_user_id is None:
-        return _PLACEHOLDER_TEAM
+        raise HTTPException(status_code=503, detail="No user identity")
 
     uid = user.classmate_user_id
     try:
@@ -371,7 +414,9 @@ async def employee_team(user: CurrentUser = Depends(get_current_user)):
         manager_id = await _run(_get_manager_id, uid)
 
         if manager_id is None:
-            return {"accomplishments": [], "popular_courses": [], "highlights": {}}
+            fallback = await _run(_get_fallback_reco_courses, uid)
+            return {"accomplishments": [], "popular_courses": fallback,
+                    "popular_source": "fallback", "highlights": {}}
 
         accomplishments, top_courses, reco_courses, highlights, completions_delta, congrats_count = await asyncio.gather(
             _run(get_team_accomplishments, manager_id, 14, uid),
@@ -383,7 +428,7 @@ async def employee_team(user: CurrentUser = Depends(get_current_user)):
         )
     except Exception as exc:
         logger.warning("Fabric unavailable for team uid=%s: %s", uid, exc)
-        return _PLACEHOLDER_TEAM
+        raise HTTPException(status_code=503, detail="Data unavailable")
 
     # Most completed non-training course for the highlights banner
     filtered_top = _filter_training_modules(top_courses)
@@ -394,10 +439,20 @@ async def employee_team(user: CurrentUser = Depends(get_current_user)):
     if not top_course_name and filtered_reco:
         top_course_name = filtered_reco[0]["course_name"]
 
+    # If the team has nothing to recommend yet, fall back to visible courses biased
+    # to the user's own learning, and tell the frontend to show the waiting message.
+    team_reco = filtered_reco[:4]
+    if team_reco:
+        popular_courses, popular_source = team_reco, "team"
+    else:
+        popular_courses = await _run(_get_fallback_reco_courses, uid)
+        popular_source = "fallback"
+
     highlights["time_delta_pct"] = completions_delta
     return {
         "accomplishments":    accomplishments,
-        "popular_courses":    filtered_reco[:4],
+        "popular_courses":    popular_courses,
+        "popular_source":     popular_source,
         "top_course":         top_course_name,
         "highlights":         highlights,
         "congrats_this_week": congrats_count,

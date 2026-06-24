@@ -174,23 +174,32 @@ def calculate_tier(user_id: int, conn=None) -> dict:
         + recency_score * 0.15
     )
 
-    # 8. Percentile from full population via vw_classmate_trainings
-    all_rows = query(
-        """
-        SELECT user_id, SUM(learning_credits) AS tc
-        FROM classmate.vw_classmate_trainings
-        WHERE status=4052
-        GROUP BY user_id
-        """,
-    )
+    # 8. Percentile: rank user's composite tier_score against cached population scores.
+    # Falls back to credits-only percentile if cache is not yet populated.
+    from nova_db.tier_scores import get_all_tier_scores
+    cached_scores = get_all_tier_scores()
 
-    if all_rows:
-        rank = sum(1 for r in all_rows if float(r["tc"] or 0) > tc)
-        approx_pct = rank / max(len(all_rows), 1) * 100
+    if cached_scores:
+        pop = list(cached_scores.values())
+        rank = sum(1 for s in pop if s > tier_score)
+        approx_pct = rank / max(len(pop), 1) * 100
     else:
-        approx_pct = 50.0
+        # Cache not yet populated — fall back to credits percentile
+        all_rows = query(
+            """
+            SELECT user_id, SUM(learning_credits) AS tc
+            FROM classmate.vw_classmate_trainings
+            WHERE status=4052
+            GROUP BY user_id
+            """,
+        )
+        if all_rows:
+            rank = sum(1 for r in all_rows if float(r["tc"] or 0) > tc)
+            approx_pct = rank / max(len(all_rows), 1) * 100
+        else:
+            approx_pct = 50.0
 
-    # 9. Tier from percentile
+    # 9. Tier from percentile (relative ranking against full population)
     current_tier, next_tier = _percentile_to_tier(approx_pct)
     tier_progress = _tier_progress(approx_pct)
 

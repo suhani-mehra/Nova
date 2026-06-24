@@ -4,9 +4,8 @@ Skill radar (5 categories) and AI proficiency scoring.
 """
 
 import logging
-import math
 import zlib
-from datetime import date, timedelta
+from datetime import date
 import re
 
 from core.database import query
@@ -45,9 +44,10 @@ CATEGORY_KEYWORDS = {
 
 AXES = ["AI", "Cloud", "Frontend", "Backend", "Data"]
 
-# Square-root mastery threshold: raw score of 1000 maps to 100%.
-# ~14 dedicated courses averaging 70 per vertical = full proficiency.
-MASTERY_THRESHOLD = 1000.0
+# Power-curve normalization: score = (raw / MASTERY_THRESHOLD) ^ MASTERY_POWER * 100
+# Power < 0.5 gives fast early progress; high threshold makes 100% very hard to reach.
+MASTERY_THRESHOLD = 5000.0
+MASTERY_POWER     = 0.4
 
 
 def _lc_topic_id(topic: str) -> int:
@@ -171,13 +171,11 @@ def calculate_skill_radar(user_id: int, conn=None) -> dict:
 
     score_map = get_scores_for_items(list(set(lookup_pairs)))
 
-    today         = date.today()
-    cutoff_this   = today - timedelta(days=365)
-    cutoff_last   = today - timedelta(days=730)
+    today          = date.today()
+    start_of_month = today.replace(day=1)
 
-    all_raw  = {ax: 0.0 for ax in AXES}
-    this_raw = {ax: 0.0 for ax in AXES}
-    last_raw = {ax: 0.0 for ax in AXES}
+    all_raw  = {ax: 0.0 for ax in AXES}   # cumulative up to today
+    prev_raw = {ax: 0.0 for ax in AXES}   # cumulative up to end of last month
 
     for item in items:
         co = item["completed_on"]
@@ -201,13 +199,11 @@ def calculate_skill_radar(user_id: int, conn=None) -> dict:
         for ax in AXES:
             v = float(sc.get(ax, 0))
             all_raw[ax] += v
-            if co_date >= cutoff_this:
-                this_raw[ax] += v
-            elif co_date >= cutoff_last:
-                last_raw[ax] += v
+            if co_date < start_of_month:
+                prev_raw[ax] += v
 
-    this_norm = {ax: round(min(100.0, math.sqrt(all_raw[ax] / MASTERY_THRESHOLD) * 100), 1) for ax in AXES}
-    last_norm = {ax: round(min(100.0, math.sqrt(last_raw[ax] / MASTERY_THRESHOLD) * 100), 1) for ax in AXES}
+    this_norm = {ax: round(min(100.0, (all_raw[ax] / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1) for ax in AXES}
+    last_norm = {ax: round(min(100.0, (prev_raw[ax] / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1) for ax in AXES}
 
     delta = round(sum(this_norm[AXES[i]] - last_norm[AXES[i]] for i in range(5)) / 5)
 
@@ -349,7 +345,7 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
             raw_scores[uid] = ur
             cache_entry = {
                 "axes":        AXES,
-                "this_month":  [round(min(100.0, math.sqrt(ur[ax] / MASTERY_THRESHOLD) * 100), 1) for ax in AXES],
+                "this_month":  [round(min(100.0, (ur[ax] / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1) for ax in AXES],
                 "last_month":  [0] * 5,
                 "delta":       0,
                 "scored_by":   "gpt",
@@ -366,7 +362,7 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
         ur = raw_scores.get(uid, {ax: 0.0 for ax in AXES})
         normed: dict[str, float] = {}
         for ax in AXES:
-            normed[ax] = round(min(100.0, math.sqrt(ur[ax] / MASTERY_THRESHOLD) * 100), 1)
+            normed[ax] = round(min(100.0, (ur[ax] / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1)
         normed["_scored_by"] = cached_results.get(uid, {}).get("scored_by", "gpt")
         result[uid] = normed
 

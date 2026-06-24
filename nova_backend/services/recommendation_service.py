@@ -104,15 +104,21 @@ def get_recommendation(user_id: int, conn=None) -> dict:
     # Catalogue excluding already completed
     catalogue_rows = query(
         """
-        SELECT id, name
-        FROM classmate.dim_classmate_second_level_category
-        WHERE is_active=1 AND is_private=0
-          AND id NOT IN (
+        SELECT DISTINCT sc.id, sc.name
+        FROM classmate.dim_classmate_second_level_category sc
+        JOIN classmate.dim_classmate_content_mapping cm
+          ON cm.second_level_category_id = sc.id
+         AND cm.is_deleted = 0
+        WHERE sc.etl_isactive = 1
+          AND sc.is_active = 1
+          AND sc.is_deleted = 0
+          AND sc.is_private = 0
+          AND sc.id NOT IN (
               SELECT second_level_category_id
               FROM classmate.vw_classmate_trainings
               WHERE user_id=? AND status=4052
           )
-        ORDER BY name
+        ORDER BY sc.name
         """,
         (user_id,),
     )

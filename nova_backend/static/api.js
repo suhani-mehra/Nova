@@ -2,9 +2,22 @@
 
 const NOVA_API_BASE = 'http://localhost:8000';
 
+// Executive dev mode — signed-in user and impersonation tracking.
+// Read immediately at script load so apiGet() has the header before initNova() runs.
+let _novaDevUserId = sessionStorage.getItem('nova_dev_uid') || null;
+let _novaImpersonateId = sessionStorage.getItem('nova_impersonate_id') || null;
+
+function novaSetImpersonate(userId) {
+  _novaImpersonateId = userId ? String(userId) : null;
+}
+
 async function apiGet(path) {
   try {
-    const res = await fetch(NOVA_API_BASE + path);
+    const token = (typeof novaGetToken === 'function') ? await novaGetToken() : null;
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    if (_novaDevUserId) headers['X-Nova-Dev-User'] = _novaDevUserId;
+    if (_novaImpersonateId) headers['X-Nova-Impersonate'] = _novaImpersonateId;
+    const res = await fetch(NOVA_API_BASE + path, { headers });
     if (!res.ok) throw new Error(`HTTP ${res.status} for GET ${path}`);
     return await res.json();
   } catch (err) {
@@ -15,9 +28,14 @@ async function apiGet(path) {
 
 async function apiPost(path, body) {
   try {
+    const token = (typeof novaGetToken === 'function') ? await novaGetToken() : null;
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (_novaDevUserId) headers['X-Nova-Dev-User'] = _novaDevUserId;
+    if (_novaImpersonateId) headers['X-Nova-Impersonate'] = _novaImpersonateId;
     const res = await fetch(NOVA_API_BASE + path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status} for POST ${path}`);
@@ -105,7 +123,9 @@ const _RECO_TILES = [
 ];
 
 function mapTeam(data) {
+  const recSource = data.popular_source || 'team';
   return {
+    recSource,
     learningTime: data.highlights.top_learner
       ? data.highlights.top_learner.credits + ' credits'
       : '—',
@@ -126,7 +146,9 @@ function mapTeam(data) {
       name:  c.course_name,
       badge: c.category || 'Other',
       cls:   (c.category || 'other').toLowerCase(),
-      meta:  `Completed by ${c.completion_count} teammate${c.completion_count === 1 ? '' : 's'}`,
+      meta:  recSource === 'fallback'
+               ? 'Based on your learning'
+               : `Completed by ${c.completion_count} teammate${c.completion_count === 1 ? '' : 's'}`,
       match: Math.max(60, 92 - i * 8),
       tile:  _RECO_TILES[i % _RECO_TILES.length],
       glyph: (c.category || 'Ot').slice(0, 2),
@@ -252,6 +274,25 @@ window.__novaDataReady = new Promise(function(resolve) { _resolveDataReady = res
 
 async function initNova() {
   try {
+    // Restore dev mode headers before the first API call
+    const devUid = sessionStorage.getItem('nova_dev_uid');
+    const impersonateId = sessionStorage.getItem('nova_impersonate_id');
+
+    // Always set the signed-in dev user separately from impersonation target
+    if (devUid) {
+      _novaDevUserId = devUid;
+    }
+    if (impersonateId) {
+      if (typeof novaSetImpersonate === 'function') {
+        novaSetImpersonate(impersonateId);
+      }
+    } else {
+      // Clear any stale impersonation
+      if (typeof novaSetImpersonate === 'function') {
+        novaSetImpersonate(null);
+      }
+    }
+
     const meData = await apiGet('/api/me');
     if (!meData) throw new Error('Could not fetch /api/me');
 
@@ -270,7 +311,11 @@ async function initNova() {
       }
     }
 
+    // Store the role globally so app.jsx can use it for tab rendering
+    window.NOVA.accounts.role = role;
+
     if (role === 'employee') {
+      window.NOVA.accounts.manager = null;
       const [dashData, teamData] = await Promise.all([
         apiGet('/api/employee/dashboard'),
         apiGet('/api/employee/team'),
@@ -278,7 +323,11 @@ async function initNova() {
       if (dashData) window.NOVA.employee = mapDashboard(dashData);
       if (teamData)  window.NOVA.team    = mapTeam(teamData);
 
+      console.log('[Nova] Real data loaded for role:', role);
+      _resolveDataReady();
+
     } else if (role === 'manager') {
+      window.NOVA.accounts.employee = null;
       const [overviewData, teamsData, peopleData] = await Promise.all([
         apiGet('/api/manager/overview'),
         apiGet('/api/manager/teams'),
@@ -287,6 +336,9 @@ async function initNova() {
       if (overviewData && teamsData && peopleData) {
         window.NOVA.manager = mapManager(overviewData, teamsData, peopleData);
       }
+
+      console.log('[Nova] Real data loaded for role:', role);
+      _resolveDataReady();
 
     } else if (role === 'both') {
       // Load all data concurrently — thread-local connections handle parallelism safely.
@@ -316,14 +368,15 @@ async function initNova() {
       } else {
         console.warn('[Nova] manager fetch incomplete — overview:', !!overviewData, 'teams:', !!teamsData, 'people:', !!peopleData);
       }
-    }
 
-    console.log('[Nova] Real data loaded for role:', role);
+      console.log('[Nova] Real data loaded for role:', role);
+      _resolveDataReady();
+    }
   } catch (err) {
-    console.warn('[Nova] API unavailable, falling back to dummy data:', err.message);
-  } finally {
-    _resolveDataReady(); // always unblock app.jsx, even on error
+    console.warn('[Nova] API unavailable:', err.message);
+    _resolveDataReady(); // unblock app.jsx; AppRoot will show the error screen
   }
 }
 
-initNova();
+// Delay initNova() slightly so the sign-in gate in app.jsx can check MSAL account first
+setTimeout(initNova, 100);

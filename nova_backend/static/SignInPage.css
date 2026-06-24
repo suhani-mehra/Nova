@@ -199,3 +199,87 @@
     font-size: 36px;
   }
 }
+
+/* ---- Dev mode form ---- */
+.nova-signin__dev-toggle {
+  margin-top: 20px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--nova-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: underline;
+  transition: color 0.2s;
+}
+.nova-signin__dev-toggle:hover {
+  color: var(--nova-link);
+}
+
+.nova-signin__dev-form {
+  margin-top: 20px;
+  padding: 16px;
+  background: #f9f8fb;
+  border-radius: 10px;
+  border: 1px solid var(--nova-divider);
+}
+
+.nova-signin__dev-input {
+  display: block;
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  background: #ffffff;
+}
+.nova-signin__dev-input:focus {
+  outline: none;
+  border-color: var(--nova-link);
+  box-shadow: 0 0 0 2px rgba(138, 79, 208, 0.1);
+}
+
+.nova-signin__dev-error {
+  margin: 8px 0;
+  padding: 0;
+  color: #d75f7e;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.nova-signin__dev-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.nova-signin__dev-submit,
+.nova-signin__dev-cancel {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.nova-signin__dev-submit {
+  background: var(--nova-grad-button);
+  color: #ffffff;
+}
+.nova-signin__dev-submit:hover {
+  opacity: 0.9;
+}
+
+.nova-signin__dev-cancel {
+  background: #e8e5f0;
+  color: var(--nova-muted);
+}
+.nova-signin__dev-cancel:hover {
+  background: #ddd9e5;
+}

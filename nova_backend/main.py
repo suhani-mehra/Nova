@@ -9,6 +9,7 @@ Run with:
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,6 +45,10 @@ async def lifespan(app: FastAPI):
     logger.info("GPT cache initialised")
     from nova_db.course_scores import init_course_scores_table
     init_course_scores_table()
+    from nova_db.tier_scores import init_tier_scores_table, refresh_tier_scores_cache
+    init_tier_scores_table()
+    from nova_db.badges import init_badges_table
+    init_badges_table()
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, _test_fabric_connection)
@@ -69,6 +74,24 @@ async def lifespan(app: FastAPI):
             loop.run_in_executor(None, _compute_dept_snapshot)
         except Exception as exc:
             logger.warning("Could not schedule dept snapshot job: %s", exc)
+        try:
+            loop.run_in_executor(None, refresh_tier_scores_cache)
+        except Exception as exc:
+            logger.warning("Could not schedule tier score refresh: %s", exc)
+
+        async def _tier_refresh_loop():
+            while True:
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
+                if now >= next_run:
+                    next_run += timedelta(days=1)
+                await asyncio.sleep((next_run - now).total_seconds())
+                try:
+                    loop.run_in_executor(None, lambda: refresh_tier_scores_cache(force=True))
+                except Exception as exc:
+                    logger.warning("Tier score nightly refresh failed: %s", exc)
+
+        asyncio.ensure_future(_tier_refresh_loop())
     except Exception as exc:
         logger.error("Fabric connection FAILED on startup: %s", exc)
         print(f"\n✗ Fabric connection FAILED: {exc}\n")
@@ -165,5 +188,14 @@ def me(user: CurrentUser = Depends(get_current_user)):
     }
 
 
-# Serve frontend — must come after all API routes
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+# Serve frontend — must come after all API routes.
+# NoCacheStaticFiles forces the browser to always refetch, so edits to the
+# .js/.jsx/.css files show up on a normal reload (no manual ?v= bumping).
+class NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        return response
+
+
+app.mount("/", NoCacheStaticFiles(directory="static", html=True), name="static")

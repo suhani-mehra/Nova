@@ -115,6 +115,7 @@ def get_team_accomplishments(
             FROM   classmate.vw_classmate_trainings vt
             WHERE  vt.status       = 4052
               AND  vt.completed_on >= DATEADD(day, -?, GETDATE())
+              AND  vt.user_id     != ?
               AND  vt.user_id IN (
                   SELECT DISTINCT user_id
                   FROM   classmate.dim_classmate_employee_profile
@@ -125,7 +126,7 @@ def get_team_accomplishments(
               )
             ORDER BY vt.completed_on DESC
             """,
-            (days, manager_user_id, own_user_id),
+            (days, own_user_id, manager_user_id, own_user_id),
         )
     else:
         rows = query(

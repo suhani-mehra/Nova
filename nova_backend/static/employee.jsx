@@ -36,31 +36,48 @@ const achIcon = (type)=>{
 
 const _radarShift = arr => arr.map(v => 25 + Math.round((v / 100) * 75));
 
+// Link a recommended course to Classmate's global search for that course name.
+const classmateSearchUrl = (name) =>
+  'https://learning.orioninc.com/OVSP/Dashboard/GlobalSearch?search=' + encodeURIComponent(name || '');
+
 /* ---------------- MY PROGRESS ---------------- */
 function MyProgress(){
   const E=NOVA.employee, T=NOVA.TIERS;
   const days=['M','T','W','T','F','S','S'];
   const curMeta  = TIER_META[E.currentTier]  || TIER_META.gold;
   const nextMeta = TIER_META[E.nextTier]     || TIER_META.diamond;
+  const isPlatinum = E.currentTier === 'platinum';
+  const hasBadges  = E.badges && E.badges.length > 0;
   return h('div',{className:'page'},
     // Tier card
-    h('div',{className:'card tier-card', style:{marginBottom:22}},
+    h('div',{className:'card tier-card', style:{marginBottom:22, '--cur-tier-glow-1':curMeta.tile[0]+'aa', '--cur-tier-glow-2':curMeta.tile[1]+'55'}},
       h('div',{className:'tier-main'},
         h('div',{className:'card-title'},'Your Tier'),
         h(TierTrack,{tiers:T, currentKey:E.currentTier}),
-        h('div',{className:'tier-progress'},
-          h(Hex,{color:curMeta.color, glyph:tierHexInner(E.currentTier), active:true, size:42}),
-          h('div',{className:'bar'}, h('i',{style:{width:E.tierProgress+'%'}})),
-          h(Hex,{color:nextMeta.color, glyph:tierHexInner(E.nextTier), active:false, size:42})
-        ),
-        h('div',{className:'next-tier'},'Next tier: ', h('b',null,nextMeta.name))
+        isPlatinum
+          ? h('div',{className:'platinum-congrats'},
+              h('div',{className:'plat-msg'},'🏆 You\'ve reached the top!'),
+              h('div',{className:'plat-sub'},'Keep it up to maintain your Platinum rank.'))
+          : h(React.Fragment,null,
+              h('div',{className:'tier-progress'},
+                h(Hex,{color:curMeta.color, glyph:tierHexInner(E.currentTier), active:true, size:42}),
+                h('div',{className:'bar'}, h('i',{style:{width:E.tierProgress+'%', background:`linear-gradient(90deg, ${curMeta.tile[0]}, ${curMeta.tile[1]})`}})),
+                h(Hex,{color:nextMeta.color, glyph:tierHexInner(E.nextTier), active:false, size:42})
+              ),
+              h('div',{className:'next-tier'},'Next tier: ', h('b',{style:{color:nextMeta.color}},nextMeta.name))
+            )
       ),
       h('aside',{className:'badges'},
         h('div',{className:'badges-title'},'Badges Earned'),
-        h('div',{className:'badge-rows'},
-          E.badges.map((g,gi)=>h('div',{className:'badge-row',key:gi},
-            Array.from({length:g.count}).map((_,i)=>
-              h(Ribbon,{key:i, color:g.color, glyph:g.glyph})))))
+        hasBadges
+          ? h('div',{className:'badge-rows'},
+              E.badges.map((g,gi)=>h('div',{className:'badge-row',key:gi},
+                Array.from({length:g.count}).map((_,i)=>
+                  h(Ribbon,{key:i, color:g.color, glyph:g.glyph})))))
+          : h('div',{className:'badge-empty'},
+              h('div',{className:'badge-empty-icon'},'🎖'),
+              h('div',{className:'badge-empty-title'},'No badges yet'),
+              h('div',{className:'badge-empty-sub'},'Complete a course to earn your first.'))
       )
     ),
     // 3 cards
@@ -98,15 +115,15 @@ function MyProgress(){
               h('div',{style:{display:'flex',alignItems:'center',gap:12,margin:'18px 0'}},
                 h('div',{className:'pbar', style:{flex:1}}, h('i',{style:{width:E.continueCourse.progress+'%'}})),
                 h('div',{style:{fontWeight:700,fontSize:13.5,color:'var(--ink-soft)'}},`${E.continueCourse.progress}% Complete`)),
-              h('button',{className:'btn-grad'},'Continue Learning'))
+              h('a',{className:'btn-grad',href:'https://learning.orioninc.com/OVSP/Dashboard',target:'_blank',rel:'noopener noreferrer',style:{textDecoration:'none',display:'block',textAlign:'center'}},'Continue Learning'))
           : h('div',{className:'card'},
               h('div',{className:'card-title'},'Continue Learning'),
               h('div',{style:{color:'var(--muted)',fontSize:14,padding:'18px 0'}},'No course in progress. Browse the library to get started.'),
-              h('button',{className:'btn-grad'},'Browse Courses')),
+              h('a',{className:'btn-grad',href:'https://learning.orioninc.com/OVSP/Dashboard',target:'_blank',rel:'noopener noreferrer',style:{textDecoration:'none',display:'block',textAlign:'center'}},'Browse Courses')),
         E.recommended
           ? h('div',{className:'card'},
               h('div',{className:'card-title', style:{marginBottom:16}},'Recommended for You'),
-              h('div',{className:'reco'},
+              h('a',{className:'reco', href:classmateSearchUrl(E.recommended.name), target:'_blank', rel:'noopener noreferrer'},
                 h(CourseTile,{grad:E.recommended.tile, glyph:'AI', size:42, glyphSize:0.7}),
                 h('div',null,
                   h('div',{style:{fontWeight:800,fontSize:15.5}},E.recommended.name),
@@ -143,9 +160,9 @@ function MyTeam(){
           h('div',null, h('div',{className:'lab strong'},TM.highlights.topCourse),
             h('div',{className:'lab'},'Most completed course'))),
         h('div',{className:'hl'},
-          h('div',{className:'ic',style:{background:TM.highlights.timeDelta>=0?'rgba(31,169,113,.12)':'rgba(226,61,110,.12)'}}, Icons.trend({size:26,color:TM.highlights.timeDelta>=0?'#1FA971':'#E23D6E'})),
+          h('div',{className:'ic',style:{background:TM.highlights.timeDelta>=0?'rgba(31,169,113,.12)':'rgba(226,61,110,.12)'}}, h('i',{className:TM.highlights.timeDelta>=0?'fa-solid fa-arrow-trend-up':'fa-solid fa-arrow-trend-down', style:{color:TM.highlights.timeDelta>=0?'#1fa971':'#e23d6e',fontSize:26}})),
           h('div',null, h('div',{className:'big',style:{color:TM.highlights.timeDelta>=0?'#1FA971':'#E23D6E'}},`${TM.highlights.timeDelta>=0?'+':''}${TM.highlights.timeDelta}%`),
-            h('div',{className:'lab'},'Team learning time vs last week')))
+            h('div',{className:'lab'},'Course completions vs last week')))
       )
     ),
     // two columns
@@ -169,18 +186,23 @@ function MyTeam(){
       // recommended
       h('div',{className:'card'},
         h('div',{className:'card-title'},'Recommended for You'),
-        h('div',{className:'card-sub'},'Courses most of your team has completed.'),
+        h('div',{className:'card-sub'},
+          TM.recSource === 'fallback'
+            ? 'Waiting for teammates to complete more courses to generate recs — until then, check these out.'
+            : 'Courses most of your team has completed.'),
         h('div',{style:{display:'flex',flexDirection:'column',gap:14,marginTop:18}},
-          TM.recommended.map((c,i)=>h('div',{className:'reco-card',key:i},
+          TM.recommended.map((c,i)=>h('a',{className:'reco-card', key:i, href:classmateSearchUrl(c.name), target:'_blank', rel:'noopener noreferrer'},
             h(CourseTile,{grad:c.tile, glyph:c.glyph, glyphSize:0.8}),
             h('div',{className:'body'},
               h('div',{className:'nm'}, c.name, h('span',{className:`badge ${c.cls}`}, c.badge)),
               h('div',{className:'meta'}, c.meta)),
-            h('div',{className:'match'},
-              h('div',{className:'pct'}, c.match+'% ', h('span',null,'match')),
-              h('div',{className:'pbar',style:{marginTop:8}}, h('i',{style:{width:c.match+'%'}})))))),
+            TM.recSource === 'fallback'
+              ? null
+              : h('div',{className:'match'},
+                  h('div',{className:'pct'}, c.match+'% ', h('span',null,'match')),
+                  h('div',{className:'pbar',style:{marginTop:8}}, h('i',{style:{width:c.match+'%'}})))))),
         h('div',{className:'link-row',style:{marginTop:18}},
-          h('button',{className:'link'},'Browse all courses ', Icons.arrow({size:18})))
+          h('a',{className:'link',href:'https://learning.orioninc.com/OVSP/Dashboard/Skills',target:'_blank',rel:'noopener noreferrer',style:{textDecoration:'none'}},'Browse all courses ', Icons.arrow({size:18})))
       )
     )
   );
