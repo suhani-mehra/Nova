@@ -69,3 +69,13 @@ def clear_expired():
             "WHERE expires_at <= datetime('now')"
         )
         c.commit()
+
+def clear_by_prefix(prefix: str) -> int:
+    """Delete all cache entries whose key starts with prefix. Returns count deleted."""
+    with _conn() as c:
+        cur = c.execute(
+            "DELETE FROM gpt_cache WHERE cache_key LIKE ?",
+            (prefix + "%",)
+        )
+        c.commit()
+        return cur.rowcount

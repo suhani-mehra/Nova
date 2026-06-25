@@ -110,7 +110,64 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Could not schedule tier score refresh: %s", exc)
 
-        async def _tier_refresh_loop():
+        def _run_nightly_refresh():
+            """
+            Runs at 3 AM nightly (after Fabric DB updates 12-2 AM).
+            Refreshes all caches so they reflect the new day's data.
+            Per-manager caches (people_list_*, direct_reports_*) are cleared
+            so they rebuild fresh on first access rather than pre-warmed.
+            """
+            import time as _time
+            from nova_db.gpt_cache import clear_by_prefix
+
+            logger.info("Nightly cache refresh starting")
+            try:
+                refresh_tier_scores_cache(force=True)
+            except Exception as exc:
+                logger.warning("Nightly tier score refresh failed: %s", exc)
+
+            _time.sleep(5)
+            try:
+                from routers.manager import _prewarm_classify_cache
+                _prewarm_classify_cache()
+            except Exception as exc:
+                logger.warning("Nightly classify pre-warm failed: %s", exc)
+
+            _time.sleep(5)
+            try:
+                from routers.manager import _prewarm_streak_cache
+                _prewarm_streak_cache()
+            except Exception as exc:
+                logger.warning("Nightly streak pre-warm failed: %s", exc)
+
+            _time.sleep(5)
+            try:
+                from routers.manager import (
+                    _compute_company_overview_stats,
+                    _compute_company_retention,
+                    _compute_company_at_risk_count,
+                    _compute_quarterly_ai_proficiency,
+                    _compute_dept_snapshot,
+                )
+                _compute_company_overview_stats()
+                _compute_company_retention()
+                _compute_company_at_risk_count()
+                _compute_quarterly_ai_proficiency()
+                _compute_dept_snapshot()
+            except Exception as exc:
+                logger.warning("Nightly company stats refresh failed: %s", exc)
+
+            # Clear stale per-manager caches then pre-warm all managers
+            clear_by_prefix("people_list_")
+            clear_by_prefix("direct_reports_")
+            try:
+                from routers.manager import _prewarm_manager_people_cache
+                _prewarm_manager_people_cache()
+            except Exception as exc:
+                logger.warning("Nightly manager people pre-warm failed: %s", exc)
+            logger.info("Nightly cache refresh complete")
+
+        async def _nightly_refresh_loop():
             while True:
                 now = datetime.now(timezone.utc).replace(tzinfo=None)
                 next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
@@ -118,11 +175,11 @@ async def lifespan(app: FastAPI):
                     next_run += timedelta(days=1)
                 await asyncio.sleep((next_run - now).total_seconds())
                 try:
-                    loop.run_in_executor(None, lambda: refresh_tier_scores_cache(force=True))
+                    loop.run_in_executor(None, _run_nightly_refresh)
                 except Exception as exc:
-                    logger.warning("Tier score nightly refresh failed: %s", exc)
+                    logger.warning("Nightly cache refresh failed to schedule: %s", exc)
 
-        asyncio.ensure_future(_tier_refresh_loop())
+        asyncio.ensure_future(_nightly_refresh_loop())
     except Exception as exc:
         logger.error("Fabric connection FAILED on startup: %s", exc)
         print(f"\n✗ Fabric connection FAILED: {exc}\n")

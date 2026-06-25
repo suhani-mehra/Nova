@@ -198,7 +198,7 @@ def _prewarm_streak_cache(chunk_size: int = 500):
                 "learning_time":       learning_time,
                 "active_days_last_30": active_30,
                 "active_days_last_90": active_90,
-            }, "computed", ttl_hours=1)
+            }, "computed", ttl_hours=25)
 
         logger.info("streak pre-warm: chunk %d–%d done", i, i + len(chunk))
 
@@ -243,9 +243,44 @@ def _prewarm_tier_cache():
             "consistency_score": 0.0,
             "recency_score":     0.0,
             "scored_by":         "batch",
-        }, "computed", ttl_hours=2)
+        }, "computed", ttl_hours=25)
 
     logger.info("tier pre-warm complete: %d entries written", len(cold))
+
+
+def _prewarm_manager_people_cache(chunk_size: int = 20):
+    """
+    Pre-warm people_list_{mgr_id}_all for every active manager.
+    Called at 3 AM after classify/streak/tier caches are warm,
+    so _build_people_list() runs cheaply (no per-user Fabric queries).
+    Also populates direct_reports_{mgr_id} as a side effect.
+    """
+    mgr_rows = _query("""
+        SELECT DISTINCT manager AS mgr_id
+        FROM classmate.dim_classmate_employee_profile
+        WHERE is_deleted = 0 AND manager IS NOT NULL
+    """)
+    if not mgr_rows:
+        logger.info("manager people pre-warm: no managers found")
+        return
+
+    mgr_ids = [r["mgr_id"] for r in mgr_rows if r["mgr_id"]]
+    logger.info("manager people pre-warm: %d managers", len(mgr_ids))
+
+    for i in range(0, len(mgr_ids), chunk_size):
+        chunk = mgr_ids[i: i + chunk_size]
+        for mgr_id in chunk:
+            try:
+                _build_people_list(mgr_id, "all")
+            except Exception as exc:
+                logger.warning("manager people pre-warm failed for mgr=%s: %s", mgr_id, exc)
+        logger.info(
+            "manager people pre-warm: %d/%d done",
+            min(i + chunk_size, len(mgr_ids)),
+            len(mgr_ids),
+        )
+
+    logger.info("manager people pre-warm complete")
 
 
 def _init_exec_users():
@@ -311,25 +346,6 @@ _PLACEHOLDER_TEAMS = {
         }
     ]
 }
-
-_PLACEHOLDER_PEOPLE = {
-    "employees": [
-        {
-            "user_id":              1,
-            "name":                 "Alice Kumar",
-            "department":           "Engineering",
-            "tier":                 "gold",
-            "credits_this_quarter": 32.0,
-            "streak":               0,
-            "ai_proficiency":       72.0,
-            "ai_trend_pct":         0.0,
-            "ai_trend_dir":         "flat",
-            "status":               "thriving",
-            "last_active":          "2025-06-14",
-        }
-    ]
-}
-
 
 # ── Core helpers ──────────────────────────────────────────────────────────────
 
@@ -426,7 +442,7 @@ def _compute_company_overview_stats() -> dict:
             "active_prev_week":         prev_week,
             "avg_credits_this_quarter": avg_credits,
         }
-        set_cache(CACHE_KEY, result, "computed", ttl_hours=1)
+        set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
         return result
     except Exception as exc:
         logger.warning("_compute_company_overview_stats failed: %s", exc)
@@ -491,7 +507,7 @@ def _compute_company_retention() -> dict:
         trend_dir    = "up" if trend_pct > 0 else "down" if trend_pct < 0 else "flat"
 
         result = {"rate": current_rate, "trend_pct": trend_pct, "trend_dir": trend_dir}
-        set_cache(CACHE_KEY, result, "computed", ttl_hours=6)
+        set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
         return result
     except Exception as exc:
         logger.warning("_compute_company_retention failed: %s", exc)
@@ -576,145 +592,11 @@ def _compute_company_at_risk_count() -> dict:
             set_cache("company_at_risk_prev", count, "computed", ttl_hours=24 * 7)
 
         result = {"count": count, "trend_pct": trend_pct, "trend_dir": trend_dir}
-        set_cache(CACHE_KEY, result, "computed", ttl_hours=6)
+        set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
         return result
     except Exception as exc:
         logger.warning("_compute_company_at_risk_count failed: %s", exc)
         return {"count": 0, "trend_pct": 0.0, "trend_dir": "flat"}
-
-
-# ── Per-person AI trend ───────────────────────────────────────────────────────
-
-def _get_people_ai_trend(user_ids: list) -> dict:
-    """
-    For each uid, compare AI-relevant learning: last 30 days vs previous 30 days.
-    Returns {uid: {"pct_change": float, "dir": "up"|"down"|"flat"}}.
-    """
-    from nova_db.course_scores import get_scores_for_items
-
-    if not user_ids:
-        return {}
-
-    ph = ",".join("?" * len(user_ids))
-    today_d = date.today()
-    cutoff_30 = today_d - timedelta(days=30)
-    cutoff_60 = today_d - timedelta(days=60)
-
-    uid_items: dict = {uid: [] for uid in user_ids}
-    lookup_pairs: set = set()
-
-    try:
-        course_rows = _query(
-            f"""SELECT user_id, second_level_category_id AS cat_id, completed_on
-                FROM classmate.vw_classmate_trainings
-                WHERE user_id IN ({ph}) AND status=4052
-                  AND completed_on >= DATEADD(day,-60,GETDATE())""",
-            tuple(user_ids),
-        )
-        for r in course_rows:
-            uid = r["user_id"]
-            cat_id = r["cat_id"]
-            co = r["completed_on"]
-            if not cat_id:
-                continue
-            co_date = co.date() if hasattr(co, "date") else co
-            uid_items[uid].append({"type": "course", "cat_id": int(cat_id), "date": co_date})
-            lookup_pairs.add(("course", int(cat_id)))
-    except Exception:
-        pass
-
-    try:
-        cert_rows = _query(
-            f"""SELECT user_id, certificate_id, completion_date AS completed_on
-                FROM classmate.fact_classmate_certification
-                WHERE user_id IN ({ph}) AND status=2
-                  AND is_active=1 AND is_deleted=0
-                  AND completion_date >= DATEADD(day,-60,GETDATE())""",
-            tuple(user_ids),
-        )
-        for r in cert_rows:
-            uid = r["user_id"]
-            cert_id = r["certificate_id"]
-            co = r["completed_on"]
-            if not cert_id:
-                continue
-            co_date = co.date() if hasattr(co, "date") else co
-            uid_items[uid].append({"type": "cert", "cert_id": int(cert_id), "date": co_date})
-            lookup_pairs.add(("cert", int(cert_id)))
-    except Exception:
-        pass
-
-    try:
-        lc_rows = _query(
-            f"""SELECT user_id, topic AS name, credit_date AS completed_on
-                FROM classmate.fact_classmate_learning_credit
-                WHERE user_id IN ({ph}) AND is_deleted=0
-                  AND credit_date >= DATEADD(day,-60,GETDATE())
-                  AND topic IS NOT NULL AND topic != ''
-                  AND (self_study_id IS NOT NULL
-                       OR session_id IS NOT NULL
-                       OR recorded_training_id IS NOT NULL)""",
-            tuple(user_ids),
-        )
-        for r in lc_rows:
-            uid  = r["user_id"]
-            name = r.get("name") or ""
-            co   = r["completed_on"]
-            if not name:
-                continue
-            co_date = co.date() if hasattr(co, "date") else co
-            tid = _zlib.crc32(name.encode("utf-8", errors="replace")) & 0x7FFFFFFF
-            uid_items[uid].append({"type": "lc", "lc_id": tid, "date": co_date})
-            lookup_pairs.add(("lc", tid))
-    except Exception:
-        pass
-
-    if not lookup_pairs:
-        return {uid: {"pct_change": 0.0, "dir": "flat"} for uid in user_ids}
-
-    score_map = get_scores_for_items(list(lookup_pairs))
-
-    result: dict = {}
-    for uid in user_ids:
-        this_ai = 0.0
-        last_ai = 0.0
-        seen_lc: set = set()
-        for item in uid_items[uid]:
-            itype = item["type"]
-            d     = item["date"]
-            if itype == "course":
-                sc = score_map.get(("course", item["cat_id"]))
-            elif itype == "cert":
-                sc = score_map.get(("cert", item["cert_id"]))
-            elif itype == "lc":
-                tid = item["lc_id"]
-                if tid in seen_lc:
-                    continue
-                seen_lc.add(tid)
-                sc = score_map.get(("lc", tid))
-            else:
-                sc = None
-            if sc is None:
-                continue
-            ai_val = float(sc.get("AI", 0))
-            if d >= cutoff_30:
-                this_ai += ai_val
-            elif d >= cutoff_60:
-                last_ai += ai_val
-
-        if last_ai == 0 and this_ai == 0:
-            result[uid] = {"pct_change": 0.0, "dir": "flat"}
-        elif last_ai == 0:
-            result[uid] = {"pct_change": 100.0, "dir": "up"}
-        else:
-            pct = round((this_ai - last_ai) / last_ai * 100, 1)
-            pct = max(-200.0, min(200.0, pct))
-            result[uid] = {
-                "pct_change": pct,
-                "dir": "up" if pct > 0 else "down" if pct < 0 else "flat",
-            }
-
-    return result
 
 
 # ── Background jobs ───────────────────────────────────────────────────────────
@@ -928,7 +810,7 @@ def _compute_quarterly_ai_proficiency() -> list:
         result[-1]["credits"] if result else 0.0,
         result[-1]["retention"] if result else 0.0,
     )
-    set_cache(CACHE_KEY, result, "computed", ttl_hours=24)
+    set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
     _trend_computing = False
     return result
 
@@ -1047,7 +929,7 @@ def _compute_dept_snapshot() -> list:
 
     # Keep current as "prev" so the next recompute can show a delta
     set_cache("dept_snapshot_prev", result, "computed", ttl_hours=24 * 7)
-    set_cache(CACHE_KEY, result, "computed", ttl_hours=24)
+    set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
 
     logger.info("dept_snapshot: complete — %d departments", len(result))
     _dept_snapshot_computing = False
@@ -1201,6 +1083,7 @@ def _enrich_search_results(uids: list, rows: list) -> list:
 
     uid_ai: dict = {}
     uid_scored_by: dict = {}
+    team_norm: dict = {}
     try:
         from services.skill_service import get_team_skill_scores
         team_norm = get_team_skill_scores(uids)
@@ -1208,6 +1091,10 @@ def _enrich_search_results(uids: list, rows: list) -> list:
         uid_scored_by = {uid: team_norm.get(uid, {}).get("_scored_by", "keywords") for uid in uids}
     except Exception as exc:
         logger.warning("_enrich_search_results: skill scores failed: %s", exc)
+
+    # Tier via the shared batch helper: reads warm tier_{uid} caches and
+    # batch-computes any cold uids in 3 Fabric queries (not 6×N per user).
+    uid_tier = _batch_tier_map(uids, team_norm)
 
     result = []
     for uid in uids:
@@ -1217,7 +1104,7 @@ def _enrich_search_results(uids: list, rows: list) -> list:
             "name":                 r.get("name", ""),
             "department":           r.get("department", "Unknown"),
             "designation":          r.get("designation", ""),
-            "tier":                 "—",
+            "tier":                 uid_tier.get(uid, "—"),
             "credits_this_quarter": round(uid_credits.get(uid, 0.0), 1),
             "streak":               0,
             "ai_proficiency":       uid_ai.get(uid, 0.0),
@@ -1363,19 +1250,160 @@ async def manager_teams(user: CurrentUser = Depends(get_current_user)):
     return {"departments": departments}
 
 
-def _build_people_list(mgr_id: int, filter_val: str) -> list:
-    from services.skill_service import get_team_skill_scores, AXES
-    from services.tier_service import _percentile_to_tier
+def _batch_tier_map(uids: list, team_norm: dict) -> dict:
+    """
+    Returns {uid: current_tier_string} for the given uids.
+
+    Reads warm tier_{uid} caches; for cold uids, batch-computes the tier with
+    the same formula as calculate_tier() using just 3 Fabric queries total
+    (not 6×N), then writes the full tier_{uid} entry (25h TTL) so the employee
+    view and people tab stay consistent. `team_norm` is the output of
+    get_team_skill_scores(uids).
+    """
+    from nova_db.gpt_cache import get_cache, set_cache
     from nova_db.tier_scores import get_all_tier_scores
+    from services.tier_service import _percentile_to_tier
+
+    if not uids:
+        return {}
+
+    tier_map: dict = {}
+    cold: list = []
+    for uid in uids:
+        _tc = get_cache(f"tier_{uid}")
+        if _tc:
+            tier_map[uid] = _tc["result"].get("current_tier", "—")
+        else:
+            cold.append(uid)
+
+    if not cold:
+        return tier_map
+
+    ph = ",".join("?" * len(cold))
+    uid_alltime_credits: dict = {}
+    uid_recency_30d: dict = {}
+    uid_active_days_90: dict = {}
+    try:
+        rows = _query(
+            f"SELECT user_id, ISNULL(SUM(learning_credits),0) AS tc "
+            f"FROM classmate.vw_classmate_trainings "
+            f"WHERE user_id IN ({ph}) AND status=4052 GROUP BY user_id",
+            tuple(cold),
+        )
+        uid_alltime_credits = {r["user_id"]: float(r["tc"] or 0) for r in rows}
+    except Exception as exc:
+        logger.warning("_batch_tier_map alltime credits failed: %s", exc)
+    try:
+        rows = _query(
+            f"SELECT user_id, ISNULL(SUM(value),0) AS c30 "
+            f"FROM classmate.fact_classmate_learning_credit "
+            f"WHERE user_id IN ({ph}) AND is_deleted=0 "
+            f"  AND credit_date >= DATEADD(day,-30,GETDATE()) GROUP BY user_id",
+            tuple(cold),
+        )
+        uid_recency_30d = {r["user_id"]: float(r["c30"] or 0) for r in rows}
+    except Exception as exc:
+        logger.warning("_batch_tier_map recency failed: %s", exc)
+    try:
+        # 90-day window ending today inclusive — matches calculate_streak's count.
+        rows = _query(
+            f"""SELECT user_id, COUNT(DISTINCT activity_date) AS ad90
+            FROM (
+                SELECT user_id, CAST(credit_date AS DATE) AS activity_date
+                FROM classmate.fact_classmate_learning_credit
+                WHERE user_id IN ({ph}) AND is_deleted=0 AND duration>0
+                UNION
+                SELECT user_id, CAST(modified_on AS DATE)
+                FROM classmate.fact_classmate_user_skill_status
+                WHERE user_id IN ({ph}) AND is_deleted=0 AND is_active=1
+                UNION
+                SELECT user_id, CAST(attended_date AS DATE)
+                FROM classmate.fact_classmate_self_study
+                WHERE user_id IN ({ph}) AND status=2 AND is_deleted=0
+            ) src
+            WHERE activity_date IS NOT NULL
+              AND activity_date >= CAST(DATEADD(day,-89,GETDATE()) AS DATE)
+              AND activity_date <= CAST(GETDATE() AS DATE)
+            GROUP BY user_id""",
+            tuple(cold) * 3,
+        )
+        uid_active_days_90 = {r["user_id"]: int(r["ad90"] or 0) for r in rows}
+    except Exception as exc:
+        logger.warning("_batch_tier_map consistency failed: %s", exc)
+
+    all_tier_scores = get_all_tier_scores()
+    sorted_scores   = sorted(all_tier_scores.values(), reverse=True)
+    total_pop       = len(sorted_scores)
+
+    # Global avg 30d recency — matches the denominator in calculate_tier() and
+    # refresh_tier_scores_cache(), so all views are consistent.
+    _avg_cached = get_cache("company_avg_30d_credits")
+    global_avg_30d = float(_avg_cached["result"]["avg"]) if _avg_cached else max(
+        sum(uid_recency_30d.values()) / max(len(uid_recency_30d), 1), 1.0
+    )
+    if global_avg_30d == 0:
+        global_avg_30d = 1.0
+
+    for uid in cold:
+        tc   = uid_alltime_credits.get(uid, 0.0)
+        ad90 = uid_active_days_90.get(uid, 0)
+        u30d = uid_recency_30d.get(uid, 0.0)
+
+        credits_score     = round(min(tc / 500 * 100, 100), 1)
+        consistency_score = round(ad90 / 90 * 100, 1)
+        recency_score     = round(min(u30d / global_avg_30d * 50, 100), 1)
+
+        # Skill: average over the 5 axes (matches calculate_tier's /5), else 50.0
+        if uid in team_norm:
+            skill_score = round(
+                sum(v for k, v in team_norm[uid].items() if not k.startswith("_")) / 5,
+                1,
+            )
+        else:
+            skill_score = 50.0
+
+        tier_score = (
+            credits_score     * 0.30
+            + skill_score     * 0.35
+            + consistency_score * 0.20
+            + recency_score   * 0.15
+        )
+
+        if total_pop > 0:
+            rank       = sum(1 for s in sorted_scores if s > tier_score)
+            approx_pct = rank / total_pop * 100
+        else:
+            approx_pct = 50.0
+
+        emp_tier, next_tier = _percentile_to_tier(approx_pct)
+        scored_by = team_norm.get(uid, {}).get("_scored_by", "keywords")
+
+        set_cache(f"tier_{uid}", {
+            "current_tier":      emp_tier,
+            "next_tier":         next_tier,
+            "tier_progress":     0,
+            "percentile":        round(approx_pct, 1),
+            "total_credits":     round(tc, 1),
+            "tier_score":        round(tier_score, 1),
+            "credits_score":     credits_score,
+            "skill_score":       skill_score,
+            "consistency_score": consistency_score,
+            "recency_score":     recency_score,
+            "scored_by":         scored_by,
+        }, "computed", ttl_hours=25)
+        tier_map[uid] = emp_tier
+
+    return tier_map
+
+
+def _build_people_list(mgr_id: int, filter_val: str) -> list:
+    from services.skill_service import get_team_skill_scores
     from nova_db.gpt_cache import get_cache, set_cache
 
     _cache_key = f"people_list_{mgr_id}_{filter_val}"
     _cached = get_cache(_cache_key)
     if _cached:
         return _cached["result"]
-
-    THRIVING_MIN_CREDITS  = 5.0
-    AT_RISK_INACTIVE_DAYS = 14
 
     reports = get_direct_reports(None, mgr_id)
     if not reports:
@@ -1397,8 +1425,6 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
         tuple(uids),
     )
     uid_credits = {r["user_id"]: float(r["credits"] or 0) for r in credit_rows}
-    avg_credits = sum(uid_credits.values()) / len(uids) if uids else 0.0
-    safe_avg    = max(avg_credits, THRIVING_MIN_CREDITS)
 
     uid_last_active: dict = {}
     try:
@@ -1422,187 +1448,36 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
         logger.warning("get_team_skill_scores failed: %s", exc)
         team_norm = {}
 
-    # AI trend — skip uids already cached, batch-fetch the rest, then write cache
-    try:
-        uncached_trend_uids = [uid for uid in uids if not get_cache(f"ai_trend_{uid}")]
-        fresh_trends = _get_people_ai_trend(uncached_trend_uids) if uncached_trend_uids else {}
-        for uid, val in fresh_trends.items():
-            set_cache(f"ai_trend_{uid}", val, "computed", ttl_hours=24)
-        trend_data = {}
-        for uid in uids:
-            c = get_cache(f"ai_trend_{uid}")
-            trend_data[uid] = c["result"] if c else fresh_trends.get(uid, {})
-    except Exception as exc:
-        logger.warning("_get_people_ai_trend failed: %s", exc)
-        trend_data = {}
+    # Batch tier lookup — reads warm tier_{uid} caches and batch-computes any
+    # cold uids in 3 Fabric queries (see _batch_tier_map), faithfully matching
+    # calculate_tier() so the manager view matches the employee view.
+    tier_map = _batch_tier_map(uids, team_norm)
 
-    # Batch tier computation — a few Fabric queries for the whole team instead of N×6 per-user.
-    # Faithfully replicates calculate_tier() so the manager view matches the employee view.
-    # Warm tier_{uid} caches are read from SQLite; only cold uids are computed here.
-    uncached_tier_uids = [uid for uid in uids if not get_cache(f"tier_{uid}")]
-
-    # 30-day recency credits are needed for the FULL team (calculate_tier averages a user's
-    # recency against ALL their teammates, not just the cold ones), so fetch over all uids.
-    uid_recency_30d: dict = {}
-    try:
-        recency_rows = _query(
-            f"SELECT user_id, ISNULL(SUM(value),0) AS c30 "
-            f"FROM classmate.fact_classmate_learning_credit "
-            f"WHERE user_id IN ({placeholders}) AND is_deleted=0 "
-            f"  AND credit_date >= DATEADD(day,-30,GETDATE()) GROUP BY user_id",
-            tuple(uids),
-        )
-        uid_recency_30d = {r["user_id"]: float(r["c30"] or 0) for r in recency_rows}
-    except Exception as exc:
-        logger.warning("batch recency credits failed: %s", exc)
-
-    # All-time credits + active-days-90 are pure per-user inputs — only needed for cold uids.
-    uid_alltime_credits: dict = {}
-    uid_active_days_90: dict = {}
-    if uncached_tier_uids:
-        ph2 = ",".join("?" * len(uncached_tier_uids))
-        try:
-            alltime_rows = _query(
-                f"SELECT user_id, ISNULL(SUM(learning_credits),0) AS tc "
-                f"FROM classmate.vw_classmate_trainings "
-                f"WHERE user_id IN ({ph2}) AND status=4052 GROUP BY user_id",
-                tuple(uncached_tier_uids),
-            )
-            uid_alltime_credits = {r["user_id"]: float(r["tc"] or 0) for r in alltime_rows}
-        except Exception as exc:
-            logger.warning("batch alltime credits failed: %s", exc)
-        try:
-            # 90-day window ending today inclusive (today-89 .. today) — matches
-            # calculate_streak's active_days_last_90 day-count.
-            consistency_rows = _query(
-                f"""SELECT user_id, COUNT(DISTINCT activity_date) AS ad90
-                FROM (
-                    SELECT user_id, CAST(credit_date AS DATE) AS activity_date
-                    FROM classmate.fact_classmate_learning_credit
-                    WHERE user_id IN ({ph2}) AND is_deleted=0 AND duration>0
-                    UNION
-                    SELECT user_id, CAST(modified_on AS DATE)
-                    FROM classmate.fact_classmate_user_skill_status
-                    WHERE user_id IN ({ph2}) AND is_deleted=0 AND is_active=1
-                    UNION
-                    SELECT user_id, CAST(attended_date AS DATE)
-                    FROM classmate.fact_classmate_self_study
-                    WHERE user_id IN ({ph2}) AND status=2 AND is_deleted=0
-                ) src
-                WHERE activity_date IS NOT NULL
-                  AND activity_date >= CAST(DATEADD(day,-89,GETDATE()) AS DATE)
-                  AND activity_date <= CAST(GETDATE() AS DATE)
-                GROUP BY user_id""",
-                tuple(uncached_tier_uids) * 3,
-            )
-            uid_active_days_90 = {r["user_id"]: int(r["ad90"] or 0) for r in consistency_rows}
-        except Exception as exc:
-            logger.warning("batch consistency failed: %s", exc)
-
-    all_tier_scores = get_all_tier_scores()
-    sorted_scores   = sorted(all_tier_scores.values(), reverse=True)
-    total_pop       = len(sorted_scores)
-
-    # Active-peer stats for the recency denominator: calculate_tier() averages a user's
-    # 30d recency against teammates who HAVE 30d activity (zero-activity teammates are
-    # excluded by its GROUP BY), excluding the user themselves.
-    # Global avg 30d recency — matches the denominator used in calculate_tier() and
-    # refresh_tier_scores_cache(), so manager and employee views are consistent.
-    _avg_cached = get_cache("company_avg_30d_credits")
-    global_avg_30d = float(_avg_cached["result"]["avg"]) if _avg_cached else max(
-        sum(uid_recency_30d.values()) / max(len(uid_recency_30d), 1), 1.0
-    )
-    if global_avg_30d == 0:
-        global_avg_30d = 1.0
-
-    today = date.today()
     employees = []
     for uid in uids:
         r = uid_to_report[uid]
         last = uid_last_active.get(uid)
         if last:
             last_date = last.date() if hasattr(last, "date") else last
-            days_inactive   = (today - last_date).days
             last_active_str = str(last_date)
         else:
-            days_inactive   = 999
             last_active_str = "never"
 
         emp_credits = uid_credits.get(uid, 0.0)
-        active_7    = days_inactive <= 7
-
-        if active_7 and emp_credits >= safe_avg:
-            emp_status = "thriving"
-        elif days_inactive >= AT_RISK_INACTIVE_DAYS and emp_credits < safe_avg * 0.5:
-            emp_status = "at_risk"
-        elif days_inactive >= 30:
-            emp_status = "at_risk"
-        else:
-            emp_status = "on_track"
-
-        if filter_val == "thriving" and emp_status != "thriving":
-            continue
-        if filter_val == "at_risk" and emp_status != "at_risk":
-            continue
 
         ai_proficiency = round(team_norm.get(uid, {}).get("AI", 0.0), 1)
         scored_by      = team_norm.get(uid, {}).get("_scored_by", "keywords")
 
-        # Tier: read from cache if warm; otherwise use batch-computed values
-        _tc = get_cache(f"tier_{uid}")
-        if _tc:
-            emp_tier = _tc["result"]["current_tier"]
-        else:
-            tc   = uid_alltime_credits.get(uid, 0.0)
-            ad90 = uid_active_days_90.get(uid, 0)
-            u30d = uid_recency_30d.get(uid, 0.0)
+        # Status is purely AI-proficiency based: < 20% = at risk, otherwise on track.
+        emp_status = "at_risk" if ai_proficiency < 20 else "on_track"
 
-            credits_score     = round(min(tc / 500 * 100, 100), 1)
-            consistency_score = round(ad90 / 90 * 100, 1)
+        if filter_val == "on_track" and emp_status != "on_track":
+            continue
+        if filter_val == "at_risk" and emp_status != "at_risk":
+            continue
 
-            # Recency denominator: average over teammates WITH 30d activity, excluding self
-            # (mirrors calculate_tier's AVG over the GROUP BY subquery).
-            recency_score = round(min(u30d / global_avg_30d * 50, 100), 1)
+        emp_tier = tier_map.get(uid, "—")
 
-            # Skill: average over the 5 axes (matches calculate_tier's /5), else 50.0
-            if uid in team_norm:
-                skill_score = round(
-                    sum(v for k, v in team_norm[uid].items() if not k.startswith("_")) / 5,
-                    1,
-                )
-            else:
-                skill_score = 50.0
-
-            tier_score = (
-                credits_score     * 0.30
-                + skill_score     * 0.35
-                + consistency_score * 0.20
-                + recency_score   * 0.15
-            )
-
-            if total_pop > 0:
-                rank       = sum(1 for s in sorted_scores if s > tier_score)
-                approx_pct = rank / total_pop * 100
-            else:
-                approx_pct = 50.0
-
-            emp_tier, next_tier = _percentile_to_tier(approx_pct)
-
-            set_cache(f"tier_{uid}", {
-                "current_tier":      emp_tier,
-                "next_tier":         next_tier,
-                "tier_progress":     0,
-                "percentile":        round(approx_pct, 1),
-                "total_credits":     round(tc, 1),
-                "tier_score":        round(tier_score, 1),
-                "credits_score":     credits_score,
-                "skill_score":       skill_score,
-                "consistency_score": consistency_score,
-                "recency_score":     recency_score,
-                "scored_by":         scored_by,
-            }, "computed", ttl_hours=24)
-
-        ai_tr = trend_data.get(uid, {})
         employees.append({
             "user_id":              uid,
             "name":                 r["name"],
@@ -1611,20 +1486,18 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
             "credits_this_quarter": round(emp_credits, 1),
             "streak":               0,
             "ai_proficiency":       ai_proficiency,
-            "ai_trend_pct":         ai_tr.get("pct_change", 0.0),
-            "ai_trend_dir":         ai_tr.get("dir", "flat"),
             "status":               emp_status,
             "last_active":          last_active_str,
             "scored_by":            scored_by,
         })
 
-    set_cache(_cache_key, employees, "computed", ttl_hours=1)
+    set_cache(_cache_key, employees, "computed", ttl_hours=25)
     return employees
 
 
 @router.get("/manager/people")
 async def manager_people(
-    filter: str = Query("all", pattern="^(all|thriving|at_risk)$"),
+    filter: str = Query("all", pattern="^(all|on_track|at_risk)$"),
     user: CurrentUser = Depends(get_current_user),
 ):
     _require_manager(user)

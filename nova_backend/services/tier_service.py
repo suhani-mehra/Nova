@@ -231,7 +231,7 @@ def calculate_tier(user_id: int, conn=None) -> dict:
         "recency_score":     recency_score,
         "scored_by":         scored_by,
     }
-    set_cache(f"tier_{user_id}", result, "computed", ttl_hours=24)
+    set_cache(f"tier_{user_id}", result, "computed", ttl_hours=25)
     return result
 
 

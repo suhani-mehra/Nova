@@ -139,7 +139,7 @@ def get_direct_reports(conn: pyodbc.Connection, manager_user_id: int) -> list[di
             r["department"] = r["department"].title()
         if r.get("designation"):
             r["designation"] = r["designation"].title()
-    set_cache(cache_key, rows, "computed", ttl_hours=1)
+    set_cache(cache_key, rows, "computed", ttl_hours=25)
     return rows
 
 

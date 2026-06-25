@@ -136,7 +136,7 @@ def calculate_skill_radar(user_id: int, conn=None) -> dict:
         "_raw_scores": {ax: 0.0 for ax in AXES},
     }
     if not completed and not certs and not lc_items:
-        set_cache(f"classify_{user_id}", empty_result, "gpt", ttl_hours=24)
+        set_cache(f"classify_{user_id}", empty_result, "gpt", ttl_hours=25)
         return empty_result
 
     # Build lookup pairs and item list
@@ -215,7 +215,7 @@ def calculate_skill_radar(user_id: int, conn=None) -> dict:
         "scored_by":   "gpt",
         "_raw_scores": all_raw,
     }
-    set_cache(f"classify_{user_id}", result, "gpt", ttl_hours=24)
+    set_cache(f"classify_{user_id}", result, "gpt", ttl_hours=25)
     return result
 
 

@@ -72,11 +72,9 @@ function MgrPeople(){
   const [searchScope,setSearchScope]=useStateM('');
   const debounceRef=React.useRef(null);
 
-  const stLabel={ok:'Thriving', warn:'On track', risk:'At risk'};
-
   const filtered = M.people.filter(p=>{
     if(filter==='all') return true;
-    if(filter==='thriving') return p.status==='ok';
+    if(filter==='on_track') return p.status==='ok';
     if(filter==='risk') return p.status==='risk';
     return true;
   });
@@ -119,7 +117,7 @@ function MgrPeople(){
         )),
       !isSearching && h('div',{className:'seg'},
         h('button',{className:filter==='all'?'on':'', onClick:()=>setFilter('all')},'All'),
-        h('button',{className:filter==='thriving'?'on':'', onClick:()=>setFilter('thriving')},'Thriving'),
+        h('button',{className:filter==='on_track'?'on':'', onClick:()=>setFilter('on_track')},'On track'),
         h('button',{className:filter==='risk'?'on':'', onClick:()=>setFilter('risk')},`At risk (${riskCount})`))),
 
     h('div',{className:'people-search-wrap'},
@@ -175,19 +173,16 @@ function MgrPeople(){
           'No employees found for "',searchQ,'"'),
       h('div',{className:'ppl-head'},
         h('div',null,'Employee'), h('div',null,'Tier'),
-        h('div',null,
-          'AI proficiency',
-          h('span',{style:{marginLeft:8,fontSize:11,fontWeight:600,color:'var(--muted)',verticalAlign:'middle'}},
-            h('span',{style:{display:'inline-block',width:8,height:8,borderRadius:2,background:'linear-gradient(90deg,#2ACCFF,#A634FF)',marginRight:3}}),
-            'on track',
-            h('span',{style:{display:'inline-block',width:8,height:8,borderRadius:2,background:'linear-gradient(90deg,#E23D6E,#FF6B88)',margin:'0 3px 0 8px'}}),
-            'at risk')),
-        h('div',null,'Trend'),
+        h('div',null,'AI proficiency'),
         h('div',{style:{textAlign:'right'}},'Status')),
       displayList.map((p,i)=>{
         const tierKey=(p.tier&&p.tier!=='—')?p.tier:'starter';
         const t=tierByKey(tierKey)||tierByKey('starter');
         const isSearch=isSearching;
+        // prof comes from mapped people (p.prof) or raw search results (p.ai_proficiency).
+        // Status is purely proficiency-based: < 20% = at risk, otherwise on track.
+        const prof=(p.prof!=null)?p.prof:Math.round(p.ai_proficiency||0);
+        const atRisk=prof<20;
         return h('div',{className:'ppl-row',key:p.user_id||i},
           h('div',{className:'who'},
             h(Avatar,{name:p.name, grad:p.av||['#A634FF','#FF4398'], size:'s'}),
@@ -201,18 +196,13 @@ function MgrPeople(){
             h('span',{style:{color:t.color}}, p.tier==='—'?'—':t.name))
             : h('span',null,'—')),
           h('div',{style:{display:'flex',alignItems:'center',gap:12}},
-            h('div',{className:'bar-wide',style:{flex:1,maxWidth:160}}, h('i',{style:{width:(p.prof||0)+'%',
-              background: (p.status==='risk'||p.status==='at_risk')?'linear-gradient(90deg,#E23D6E,#FF6B88)':'linear-gradient(90deg,#2ACCFF,#A634FF)'}})),
-            h('div',{className:'pct-strong',style:{width:42}}, (p.prof||0)+'%')),
-          h('div',null, isSearch
-            ? h('span',{className:'trend-cell flat'}, trendIco('flat'), '—')
-            : h('span',{className:`trend-cell ${p.dir||'flat'}`}, trendIco(p.dir||'flat'), p.trend||'—')),
+            h('div',{className:'bar-wide',style:{flex:1,maxWidth:160}}, h('i',{style:{width:prof+'%',
+              background: atRisk?'linear-gradient(90deg,#E23D6E,#FF6B88)':'linear-gradient(90deg,#2ACCFF,#A634FF)'}})),
+            h('div',{className:'pct-strong',style:{width:42}}, prof+'%')),
           h('div',{style:{textAlign:'right'}},
-            p.status==='—'
-              ? h('span',{className:'status warn'}, h('span',{className:'dot'}), '—')
-              : h('span',{className:`status ${p.status==='at_risk'?'risk':p.status==='thriving'?'ok':'warn'}`},
-                  h('span',{className:'dot'}),
-                  p.status==='at_risk'?'At risk':p.status==='thriving'?'Thriving':'On track')));
+            h('span',{className:`status ${atRisk?'risk':'ok'}`},
+              h('span',{className:'dot'}),
+              atRisk?'At risk':'On track')));
       })
     )
   );

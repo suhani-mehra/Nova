@@ -98,5 +98,5 @@ def calculate_streak(user_id: int, conn=None) -> dict:
         "active_days_last_30": active_30,
         "active_days_last_90": active_90,
     }
-    set_cache(f"streak_{user_id}", result, "computed", ttl_hours=1)
+    set_cache(f"streak_{user_id}", result, "computed", ttl_hours=25)
     return result

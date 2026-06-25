@@ -315,7 +315,7 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 .status .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
 
 /* people table */
-.ppl-head,.ppl-row{display:grid;grid-template-columns:2fr 1fr 1.5fr 1.1fr auto;align-items:center;gap:16px}
+.ppl-head,.ppl-row{display:grid;grid-template-columns:2fr 1fr 1.5fr 110px;align-items:center;gap:16px}
 .ppl-head{padding:0 16px 12px;font-size:11.5px;font-weight:700;color:var(--muted-2);text-transform:uppercase;letter-spacing:.05em}
 .ppl-row{padding:14px 16px;border-radius:14px;border:1px solid transparent;transition:.14s}
 .ppl-row:hover{background:#faf9fe;border-color:var(--line)}
