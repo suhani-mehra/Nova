@@ -26,6 +26,40 @@ _executor = ThreadPoolExecutor(max_workers=8)
 
 _trend_computing = False          # guard against concurrent AI trend recomputes
 _dept_snapshot_computing = False  # guard against concurrent dept snapshot recomputes
+_swr_inflight: set = set()        # cache keys with a background recompute in flight
+
+
+def _swr(cache_key: str, compute_fn, fallback):
+    """
+    Stale-while-revalidate read for an expensive company-wide stat.
+
+    Returns the fresh cached value if present. If the cache is expired (or
+    missing), returns the stale value immediately and triggers a single
+    background recompute — so the request never blocks on a full company scan.
+    Falls back to `fallback` only when nothing has ever been cached.
+    """
+    from nova_db.gpt_cache import get_cache, get_cache_stale
+
+    fresh = get_cache(cache_key)
+    if fresh:
+        return fresh["result"]
+
+    if cache_key not in _swr_inflight:
+        _swr_inflight.add(cache_key)
+
+        def _recompute():
+            try:
+                compute_fn()  # recomputes and writes cache internally
+            except Exception as exc:
+                logger.warning("_swr recompute failed for %s: %s", cache_key, exc)
+            finally:
+                _swr_inflight.discard(cache_key)
+
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(_executor, _recompute)
+
+    stale = get_cache_stale(cache_key)
+    return stale["result"] if stale else fallback
 
 
 # ── Exec access sets ──────────────────────────────────────────────────────────
@@ -37,6 +71,181 @@ EXEC_USER_NAMES = [
     "eric verdes",
 ]
 RECURSIVE_USER_IDS: set[int] = {5575}
+
+
+def _get_all_active_uids() -> list[int]:
+    """Fetch all active user IDs from Fabric (the full 7225 population)."""
+    from core.queries import _DEDUP_CTE
+    try:
+        rows = _query(
+            _DEDUP_CTE + """
+            SELECT user_id FROM latest_profiles WHERE rn = 1
+            """
+        )
+        return [int(r["user_id"]) for r in rows if r["user_id"]]
+    except Exception as exc:
+        logger.warning("_get_all_active_uids failed, falling back to tier_scores table: %s", exc)
+        from nova_db.tier_scores import get_all_tier_scores
+        return list(get_all_tier_scores().keys())
+
+
+def _prewarm_classify_cache(chunk_size: int = 200):
+    """
+    Background job: recompute classify_{uid} for every active user whose cache
+    is currently missing. Covers the full population (~7225), not just those
+    with credits. Runs in chunks to avoid oversized IN clauses.
+    """
+    from nova_db.gpt_cache import get_cache
+    from services.skill_service import get_team_skill_scores
+
+    all_uids = _get_all_active_uids()
+    cold = [uid for uid in all_uids if not get_cache(f"classify_{uid}")]
+    logger.info("classify pre-warm: %d cold out of %d total", len(cold), len(all_uids))
+    for i in range(0, len(cold), chunk_size):
+        chunk = cold[i : i + chunk_size]
+        try:
+            get_team_skill_scores(chunk)
+            logger.info("classify pre-warm: chunk %d–%d done", i, i + len(chunk))
+        except Exception as exc:
+            logger.warning("classify pre-warm chunk %d failed: %s", i, exc)
+    logger.info("classify pre-warm complete")
+
+
+def _prewarm_streak_cache(chunk_size: int = 500):
+    """
+    Background job: batch-compute streak_{uid} for all active users using 2
+    Fabric queries per chunk instead of 2 per user.
+    """
+    from nova_db.gpt_cache import get_cache, set_cache
+    from datetime import date, timedelta
+
+    all_uids = _get_all_active_uids()
+    cold = [uid for uid in all_uids if not get_cache(f"streak_{uid}")]
+    logger.info("streak pre-warm: %d cold out of %d total", len(cold), len(all_uids))
+
+    today  = date.today()
+    monday = today - timedelta(days=today.weekday())
+
+    for i in range(0, len(cold), chunk_size):
+        chunk = cold[i : i + chunk_size]
+        ph = ",".join("?" * len(chunk))
+        try:
+            activity_rows = _query(
+                f"""
+                SELECT DISTINCT user_id, CAST(activity_date AS DATE) AS activity_date
+                FROM (
+                    SELECT user_id, credit_date AS activity_date
+                    FROM classmate.fact_classmate_learning_credit
+                    WHERE user_id IN ({ph}) AND is_deleted=0 AND duration>0
+                    UNION
+                    SELECT user_id, CAST(modified_on AS DATE)
+                    FROM classmate.fact_classmate_user_skill_status
+                    WHERE user_id IN ({ph}) AND is_deleted=0 AND is_active=1
+                    UNION
+                    SELECT user_id, attended_date
+                    FROM classmate.fact_classmate_self_study
+                    WHERE user_id IN ({ph}) AND status=2 AND is_deleted=0
+                ) src
+                WHERE activity_date IS NOT NULL
+                  AND activity_date >= CAST(DATEADD(day,-365,GETDATE()) AS DATE)
+                """,
+                tuple(chunk) * 3,
+            )
+            week_rows = _query(
+                f"""
+                SELECT user_id, SUM(duration) AS total_dur
+                FROM classmate.fact_classmate_learning_credit
+                WHERE user_id IN ({ph}) AND is_deleted=0 AND duration>0
+                  AND credit_date >= ? AND credit_date <= ?
+                GROUP BY user_id
+                """,
+                tuple(chunk) + (monday, monday + timedelta(days=6)),
+            )
+        except Exception as exc:
+            logger.warning("streak pre-warm chunk %d failed: %s", i, exc)
+            continue
+
+        uid_active: dict[int, set] = {uid: set() for uid in chunk}
+        for r in activity_rows:
+            uid = r["user_id"]
+            d   = r["activity_date"]
+            if d and uid in uid_active:
+                uid_active[uid].add(d.date() if hasattr(d, "date") else d)
+
+        uid_week_secs = {r["user_id"]: int(r["total_dur"] or 0) for r in week_rows}
+
+        for uid in chunk:
+            active_days = uid_active[uid]
+
+            streak = 0
+            check  = today if today in active_days else today - timedelta(days=1)
+            while check in active_days:
+                streak += 1
+                check  -= timedelta(days=1)
+
+            week_map = [(monday + timedelta(days=j)) in active_days for j in range(7)]
+
+            secs  = uid_week_secs.get(uid, 0)
+            h, r  = divmod(secs, 3600)
+            learning_time = f"{h}h {r // 60}m"
+
+            active_30 = sum(1 for j in range(30) if (today - timedelta(days=j)) in active_days)
+            active_90 = sum(1 for j in range(90) if (today - timedelta(days=j)) in active_days)
+
+            set_cache(f"streak_{uid}", {
+                "current_streak":      streak,
+                "week_map":            week_map,
+                "learning_time":       learning_time,
+                "active_days_last_30": active_30,
+                "active_days_last_90": active_90,
+            }, "computed", ttl_hours=1)
+
+        logger.info("streak pre-warm: chunk %d–%d done", i, i + len(chunk))
+
+    logger.info("streak pre-warm complete")
+
+
+def _prewarm_tier_cache():
+    """
+    Background job: write a preliminary tier_{uid} for every user in
+    user_tier_scores whose cache is cold. Uses the batch-computed tier_score
+    (global-avg recency) with a short 2h TTL so it's replaced by the exact
+    per-user value the first time calculate_tier() runs for real.
+    """
+    from nova_db.tier_scores import get_all_tier_scores
+    from nova_db.gpt_cache import get_cache, set_cache
+    from services.tier_service import _percentile_to_tier
+
+    all_scores = get_all_tier_scores()
+    if not all_scores:
+        logger.info("tier pre-warm: no scores in user_tier_scores, skipping")
+        return
+
+    sorted_scores = sorted(all_scores.values(), reverse=True)
+    total_pop     = len(sorted_scores)
+    cold          = [(uid, score) for uid, score in all_scores.items()
+                     if not get_cache(f"tier_{uid}")]
+    logger.info("tier pre-warm: %d cold out of %d total", len(cold), total_pop)
+
+    for uid, tier_score in cold:
+        rank       = sum(1 for s in sorted_scores if s > tier_score)
+        approx_pct = rank / total_pop * 100
+        current_tier, next_tier = _percentile_to_tier(approx_pct)
+        set_cache(f"tier_{uid}", {
+            "current_tier":      current_tier,
+            "next_tier":         next_tier,
+            "tier_progress":     0,
+            "percentile":        round(approx_pct, 1),
+            "total_credits":     0.0,
+            "tier_score":        round(tier_score, 1),
+            "credits_score":     0.0,
+            "skill_score":       0.0,
+            "consistency_score": 0.0,
+            "recency_score":     0.0,
+            "scored_by":         "batch",
+        }, "computed", ttl_hours=2)
+
+    logger.info("tier pre-warm complete: %d entries written", len(cold))
 
 
 def _init_exec_users():
@@ -1030,11 +1239,25 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
     global _trend_computing
     mgr_id = user.classmate_user_id
     try:
-        at_risk, overview_stats, retention, at_risk_count = await asyncio.gather(
-            _run(get_at_risk_employees, mgr_id),
-            _run(_compute_company_overview_stats),
-            _run(_compute_company_retention),
-            _run(_compute_company_at_risk_count),
+        # All four stats use stale-while-revalidate: return last cached value instantly
+        # and recompute in background so the request never blocks on a Fabric scan.
+        at_risk = _swr(
+            f"at_risk_{mgr_id}",
+            lambda: get_at_risk_employees(mgr_id),
+            [],
+        )
+        overview_stats = _swr(
+            "company_overview_stats", _compute_company_overview_stats,
+            {"headcount": 0, "active_this_week": 0,
+             "active_prev_week": 0, "avg_credits_this_quarter": 0.0},
+        )
+        retention = _swr(
+            "retention_snapshot", _compute_company_retention,
+            {"rate": 0.0, "trend_pct": 0.0, "trend_dir": "flat"},
+        )
+        at_risk_count = _swr(
+            "company_at_risk_count", _compute_company_at_risk_count,
+            {"count": 0, "trend_pct": 0.0, "trend_dir": "flat"},
         )
 
         from nova_db.gpt_cache import get_cache
@@ -1142,7 +1365,14 @@ async def manager_teams(user: CurrentUser = Depends(get_current_user)):
 
 def _build_people_list(mgr_id: int, filter_val: str) -> list:
     from services.skill_service import get_team_skill_scores, AXES
-    from services.tier_service import calculate_tier
+    from services.tier_service import _percentile_to_tier
+    from nova_db.tier_scores import get_all_tier_scores
+    from nova_db.gpt_cache import get_cache, set_cache
+
+    _cache_key = f"people_list_{mgr_id}_{filter_val}"
+    _cached = get_cache(_cache_key)
+    if _cached:
+        return _cached["result"]
 
     THRIVING_MIN_CREDITS  = 5.0
     AT_RISK_INACTIVE_DAYS = 14
@@ -1192,11 +1422,98 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
         logger.warning("get_team_skill_scores failed: %s", exc)
         team_norm = {}
 
+    # AI trend — skip uids already cached, batch-fetch the rest, then write cache
     try:
-        trend_data = _get_people_ai_trend(uids)
+        uncached_trend_uids = [uid for uid in uids if not get_cache(f"ai_trend_{uid}")]
+        fresh_trends = _get_people_ai_trend(uncached_trend_uids) if uncached_trend_uids else {}
+        for uid, val in fresh_trends.items():
+            set_cache(f"ai_trend_{uid}", val, "computed", ttl_hours=24)
+        trend_data = {}
+        for uid in uids:
+            c = get_cache(f"ai_trend_{uid}")
+            trend_data[uid] = c["result"] if c else fresh_trends.get(uid, {})
     except Exception as exc:
         logger.warning("_get_people_ai_trend failed: %s", exc)
         trend_data = {}
+
+    # Batch tier computation — a few Fabric queries for the whole team instead of N×6 per-user.
+    # Faithfully replicates calculate_tier() so the manager view matches the employee view.
+    # Warm tier_{uid} caches are read from SQLite; only cold uids are computed here.
+    uncached_tier_uids = [uid for uid in uids if not get_cache(f"tier_{uid}")]
+
+    # 30-day recency credits are needed for the FULL team (calculate_tier averages a user's
+    # recency against ALL their teammates, not just the cold ones), so fetch over all uids.
+    uid_recency_30d: dict = {}
+    try:
+        recency_rows = _query(
+            f"SELECT user_id, ISNULL(SUM(value),0) AS c30 "
+            f"FROM classmate.fact_classmate_learning_credit "
+            f"WHERE user_id IN ({placeholders}) AND is_deleted=0 "
+            f"  AND credit_date >= DATEADD(day,-30,GETDATE()) GROUP BY user_id",
+            tuple(uids),
+        )
+        uid_recency_30d = {r["user_id"]: float(r["c30"] or 0) for r in recency_rows}
+    except Exception as exc:
+        logger.warning("batch recency credits failed: %s", exc)
+
+    # All-time credits + active-days-90 are pure per-user inputs — only needed for cold uids.
+    uid_alltime_credits: dict = {}
+    uid_active_days_90: dict = {}
+    if uncached_tier_uids:
+        ph2 = ",".join("?" * len(uncached_tier_uids))
+        try:
+            alltime_rows = _query(
+                f"SELECT user_id, ISNULL(SUM(learning_credits),0) AS tc "
+                f"FROM classmate.vw_classmate_trainings "
+                f"WHERE user_id IN ({ph2}) AND status=4052 GROUP BY user_id",
+                tuple(uncached_tier_uids),
+            )
+            uid_alltime_credits = {r["user_id"]: float(r["tc"] or 0) for r in alltime_rows}
+        except Exception as exc:
+            logger.warning("batch alltime credits failed: %s", exc)
+        try:
+            # 90-day window ending today inclusive (today-89 .. today) — matches
+            # calculate_streak's active_days_last_90 day-count.
+            consistency_rows = _query(
+                f"""SELECT user_id, COUNT(DISTINCT activity_date) AS ad90
+                FROM (
+                    SELECT user_id, CAST(credit_date AS DATE) AS activity_date
+                    FROM classmate.fact_classmate_learning_credit
+                    WHERE user_id IN ({ph2}) AND is_deleted=0 AND duration>0
+                    UNION
+                    SELECT user_id, CAST(modified_on AS DATE)
+                    FROM classmate.fact_classmate_user_skill_status
+                    WHERE user_id IN ({ph2}) AND is_deleted=0 AND is_active=1
+                    UNION
+                    SELECT user_id, CAST(attended_date AS DATE)
+                    FROM classmate.fact_classmate_self_study
+                    WHERE user_id IN ({ph2}) AND status=2 AND is_deleted=0
+                ) src
+                WHERE activity_date IS NOT NULL
+                  AND activity_date >= CAST(DATEADD(day,-89,GETDATE()) AS DATE)
+                  AND activity_date <= CAST(GETDATE() AS DATE)
+                GROUP BY user_id""",
+                tuple(uncached_tier_uids) * 3,
+            )
+            uid_active_days_90 = {r["user_id"]: int(r["ad90"] or 0) for r in consistency_rows}
+        except Exception as exc:
+            logger.warning("batch consistency failed: %s", exc)
+
+    all_tier_scores = get_all_tier_scores()
+    sorted_scores   = sorted(all_tier_scores.values(), reverse=True)
+    total_pop       = len(sorted_scores)
+
+    # Active-peer stats for the recency denominator: calculate_tier() averages a user's
+    # 30d recency against teammates who HAVE 30d activity (zero-activity teammates are
+    # excluded by its GROUP BY), excluding the user themselves.
+    # Global avg 30d recency — matches the denominator used in calculate_tier() and
+    # refresh_tier_scores_cache(), so manager and employee views are consistent.
+    _avg_cached = get_cache("company_avg_30d_credits")
+    global_avg_30d = float(_avg_cached["result"]["avg"]) if _avg_cached else max(
+        sum(uid_recency_30d.values()) / max(len(uid_recency_30d), 1), 1.0
+    )
+    if global_avg_30d == 0:
+        global_avg_30d = 1.0
 
     today = date.today()
     employees = []
@@ -1231,22 +1548,59 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
         ai_proficiency = round(team_norm.get(uid, {}).get("AI", 0.0), 1)
         scored_by      = team_norm.get(uid, {}).get("_scored_by", "keywords")
 
-        try:
-            tier_data = calculate_tier(uid)
-            emp_tier  = tier_data["current_tier"]
-        except Exception:
-            all_creds = list(uid_credits.values())
-            max_cred  = max(all_creds) if all_creds else 0.0
-            def _team_tier(credits: float) -> str:
-                if max_cred == 0: return "starter"
-                pct = credits / max_cred * 100
-                if pct >= 90: return "platinum"
-                if pct >= 70: return "diamond"
-                if pct >= 50: return "gold"
-                if pct >= 30: return "silver"
-                if pct >= 10: return "bronze"
-                return "starter"
-            emp_tier = _team_tier(emp_credits)
+        # Tier: read from cache if warm; otherwise use batch-computed values
+        _tc = get_cache(f"tier_{uid}")
+        if _tc:
+            emp_tier = _tc["result"]["current_tier"]
+        else:
+            tc   = uid_alltime_credits.get(uid, 0.0)
+            ad90 = uid_active_days_90.get(uid, 0)
+            u30d = uid_recency_30d.get(uid, 0.0)
+
+            credits_score     = round(min(tc / 500 * 100, 100), 1)
+            consistency_score = round(ad90 / 90 * 100, 1)
+
+            # Recency denominator: average over teammates WITH 30d activity, excluding self
+            # (mirrors calculate_tier's AVG over the GROUP BY subquery).
+            recency_score = round(min(u30d / global_avg_30d * 50, 100), 1)
+
+            # Skill: average over the 5 axes (matches calculate_tier's /5), else 50.0
+            if uid in team_norm:
+                skill_score = round(
+                    sum(v for k, v in team_norm[uid].items() if not k.startswith("_")) / 5,
+                    1,
+                )
+            else:
+                skill_score = 50.0
+
+            tier_score = (
+                credits_score     * 0.30
+                + skill_score     * 0.35
+                + consistency_score * 0.20
+                + recency_score   * 0.15
+            )
+
+            if total_pop > 0:
+                rank       = sum(1 for s in sorted_scores if s > tier_score)
+                approx_pct = rank / total_pop * 100
+            else:
+                approx_pct = 50.0
+
+            emp_tier, next_tier = _percentile_to_tier(approx_pct)
+
+            set_cache(f"tier_{uid}", {
+                "current_tier":      emp_tier,
+                "next_tier":         next_tier,
+                "tier_progress":     0,
+                "percentile":        round(approx_pct, 1),
+                "total_credits":     round(tc, 1),
+                "tier_score":        round(tier_score, 1),
+                "credits_score":     credits_score,
+                "skill_score":       skill_score,
+                "consistency_score": consistency_score,
+                "recency_score":     recency_score,
+                "scored_by":         scored_by,
+            }, "computed", ttl_hours=24)
 
         ai_tr = trend_data.get(uid, {})
         employees.append({
@@ -1264,6 +1618,7 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
             "scored_by":            scored_by,
         })
 
+    set_cache(_cache_key, employees, "computed", ttl_hours=1)
     return employees
 
 

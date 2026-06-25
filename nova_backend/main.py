@@ -60,6 +60,24 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Could not schedule exec user lookup: %s", exc)
         try:
+            from routers.manager import (
+                _prewarm_classify_cache,
+                _prewarm_streak_cache,
+            )
+            import time as _time
+
+            def _staggered_prewarms():
+                # Stagger so pre-warm jobs don't all hit Fabric simultaneously
+                # alongside the other startup jobs (score_all_courses, ai_trend, etc.)
+                _time.sleep(10)
+                _prewarm_classify_cache()
+                _time.sleep(5)
+                _prewarm_streak_cache()
+
+            loop.run_in_executor(None, _staggered_prewarms)
+        except Exception as exc:
+            logger.warning("Could not schedule cache pre-warms: %s", exc)
+        try:
             from services.course_scoring_service import score_all_courses
             loop.run_in_executor(None, score_all_courses)
         except Exception as exc:
@@ -74,6 +92,19 @@ async def lifespan(app: FastAPI):
             loop.run_in_executor(None, _compute_dept_snapshot)
         except Exception as exc:
             logger.warning("Could not schedule dept snapshot job: %s", exc)
+        try:
+            # Pre-warm the expensive company-wide overview stats so the manager
+            # overview page never blocks on a full company scan after a restart.
+            from routers.manager import (
+                _compute_company_overview_stats,
+                _compute_company_retention,
+                _compute_company_at_risk_count,
+            )
+            loop.run_in_executor(None, _compute_company_overview_stats)
+            loop.run_in_executor(None, _compute_company_retention)
+            loop.run_in_executor(None, _compute_company_at_risk_count)
+        except Exception as exc:
+            logger.warning("Could not schedule company overview stats warm-up: %s", exc)
         try:
             loop.run_in_executor(None, refresh_tier_scores_cache)
         except Exception as exc:

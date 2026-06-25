@@ -113,6 +113,12 @@ def get_direct_reports(conn: pyodbc.Connection, manager_user_id: int) -> list[di
     Uses dedup CTE. No join to dim_classmate_user — that table has multiple rows
     per user_id and would cause SCD fan-out duplicates.
     """
+    from nova_db.gpt_cache import get_cache, set_cache
+    cache_key = f"direct_reports_{manager_user_id}"
+    cached = get_cache(cache_key)
+    if cached:
+        return cached["result"]
+
     sql = _DEDUP_CTE + """
         SELECT
             ep.user_id,
@@ -133,6 +139,7 @@ def get_direct_reports(conn: pyodbc.Connection, manager_user_id: int) -> list[di
             r["department"] = r["department"].title()
         if r.get("designation"):
             r["designation"] = r["designation"].title()
+    set_cache(cache_key, rows, "computed", ttl_hours=1)
     return rows
 
 

@@ -35,6 +35,21 @@ def get_cache(key: str) -> dict | None:
     except Exception:
         return None
 
+def get_cache_stale(key: str) -> dict | None:
+    """Like get_cache but ignores expiry — for stale-while-revalidate reads."""
+    with _conn() as c:
+        row = c.execute(
+            "SELECT result, scored_by FROM gpt_cache WHERE cache_key=?",
+            (key,)
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        return {"result": json.loads(row["result"]),
+                "scored_by": row["scored_by"]}
+    except Exception:
+        return None
+
 def set_cache(key: str, result: dict,
               scored_by: str, ttl_hours: int = 24):
     expires = (datetime.utcnow() +

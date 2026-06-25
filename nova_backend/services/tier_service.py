@@ -80,6 +80,11 @@ _TIER_BANDS = {
 
 
 def calculate_tier(user_id: int, conn=None) -> dict:
+    from nova_db.gpt_cache import get_cache, set_cache
+    _tier_cached = get_cache(f"tier_{user_id}")
+    if _tier_cached:
+        return _tier_cached["result"]
+
     # 1. Total credits from completed trainings
     tc_rows = query(
         """
@@ -133,7 +138,7 @@ def calculate_tier(user_id: int, conn=None) -> dict:
         logger.warning("streak failed for uid=%s: %s", user_id, exc)
         consistency_score = 0.0
 
-    # 6. Recency score
+    # 6. Recency score — relative to company-wide average (not team average)
     recency_rows = query(
         """
         SELECT ISNULL(SUM(value), 0) AS credits
@@ -145,23 +150,25 @@ def calculate_tier(user_id: int, conn=None) -> dict:
     )
     user_recency = float(recency_rows[0]["credits"] or 0) if recency_rows else 0.0
 
-    if teammate_ids:
-        ph = ",".join("?" * len(teammate_ids))
+    # Use cached global avg (written by refresh_tier_scores_cache at startup/3AM).
+    # Falls back to a direct Fabric query if cache is cold.
+    from nova_db.gpt_cache import get_cache as _gc
+    _avg_cached = _gc("company_avg_30d_credits")
+    if _avg_cached:
+        avg = float(_avg_cached["result"].get("avg") or 1.0)
+    else:
         avg_rows = query(
-            f"""
+            """
             SELECT AVG(s.credits) AS avg_c FROM (
                 SELECT user_id, SUM(value) AS credits
                 FROM classmate.fact_classmate_learning_credit
-                WHERE user_id IN ({ph}) AND is_deleted=0
+                WHERE is_deleted=0
                   AND credit_date >= DATEADD(day,-30,GETDATE())
                 GROUP BY user_id
             ) s
-            """,
-            tuple(teammate_ids),
+            """
         )
         avg = float(avg_rows[0]["avg_c"] or user_recency or 1.0) if avg_rows else (user_recency or 1.0)
-    else:
-        avg = user_recency or 1.0
     if avg == 0:
         avg = 1.0
     recency_score = round(min(user_recency / avg * 50, 100), 1)
@@ -211,7 +218,7 @@ def calculate_tier(user_id: int, conn=None) -> dict:
     except Exception:
         scored_by = "keywords"
 
-    return {
+    result = {
         "current_tier":      current_tier,
         "next_tier":         next_tier,
         "tier_progress":     tier_progress,
@@ -224,6 +231,8 @@ def calculate_tier(user_id: int, conn=None) -> dict:
         "recency_score":     recency_score,
         "scored_by":         scored_by,
     }
+    set_cache(f"tier_{user_id}", result, "computed", ttl_hours=24)
+    return result
 
 
 def get_all_user_tiers(conn=None) -> dict:

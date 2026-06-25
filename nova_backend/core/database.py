@@ -109,37 +109,81 @@ def get_connection() -> pyodbc.Connection:
 
 # ── Public query helpers ──────────────────────────────────────────────────────
 
+# pyodbc SQLSTATE codes that indicate a dropped/broken connection — safe to retry.
+_TRANSIENT_STATES = {"08S01", "08001", "HYT00", "HY000"}
+_MAX_RETRIES = 2
+
+
+def _is_transient(exc: Exception) -> bool:
+    args = getattr(exc, "args", ())
+    if args and isinstance(args[0], str) and args[0] in _TRANSIENT_STATES:
+        return True
+    # pyodbc sometimes wraps the state inside a tuple as the first arg
+    if args and isinstance(args[0], tuple) and args[0] and args[0][0] in _TRANSIENT_STATES:
+        return True
+    return False
+
+
+def _drop_connection():
+    """Force-close this thread's connection so the next get_connection() reconnects."""
+    conn = getattr(_local, "connection", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _local.connection = None
+
+
 def query(sql: str, params: Optional[tuple] = None) -> list[dict]:
     """
     Executes a parameterised SQL query and returns results as a list of dicts.
-
-    Example:
-        rows = query("SELECT * FROM dim_user WHERE id = ?", (user_id,))
+    Retries up to _MAX_RETRIES times on transient connection failures (08S01 etc.)
+    by dropping and re-opening the per-thread connection.
     """
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(sql, params or ())
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    except Exception as exc:
-        if settings.is_dev:
-            logger.error("Query failed: %s\nSQL: %s\nParams: %s", exc, sql, params)
-        raise
+    for attempt in range(_MAX_RETRIES + 1):
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql, params or ())
+            columns = [col[0] for col in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except Exception as exc:
+            if _is_transient(exc) and attempt < _MAX_RETRIES:
+                logger.warning(
+                    "Transient Fabric error (attempt %d/%d), reconnecting: %s",
+                    attempt + 1, _MAX_RETRIES, exc,
+                )
+                _drop_connection()
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            if settings.is_dev:
+                logger.error("Query failed: %s\nSQL: %s\nParams: %s", exc, sql, params)
+            raise
 
 
 def query_df(sql: str, params: Optional[tuple] = None) -> pd.DataFrame:
     """
     Executes a parameterised SQL query and returns results as a pandas DataFrame.
+    Retries on transient connection failures.
     """
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(sql, params or ())
-        columns = [col[0] for col in cursor.description]
-        rows = cursor.fetchall()
-        return pd.DataFrame([list(row) for row in rows], columns=columns)
-    except Exception as exc:
-        if settings.is_dev:
-            logger.error("query_df failed: %s\nSQL: %s\nParams: %s", exc, sql, params)
-        raise
+    for attempt in range(_MAX_RETRIES + 1):
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql, params or ())
+            columns = [col[0] for col in cursor.description]
+            rows = cursor.fetchall()
+            return pd.DataFrame([list(row) for row in rows], columns=columns)
+        except Exception as exc:
+            if _is_transient(exc) and attempt < _MAX_RETRIES:
+                logger.warning(
+                    "Transient Fabric error query_df (attempt %d/%d), reconnecting: %s",
+                    attempt + 1, _MAX_RETRIES, exc,
+                )
+                _drop_connection()
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            if settings.is_dev:
+                logger.error("query_df failed: %s\nSQL: %s\nParams: %s", exc, sql, params)
+            raise

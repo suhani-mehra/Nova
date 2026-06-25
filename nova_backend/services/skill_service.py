@@ -321,8 +321,12 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
 
         score_map = get_scores_for_items(list(lookup_pairs))
 
+        from datetime import date
+        start_of_month = date.today().replace(day=1)
+
         for uid in uncached_uids:
-            ur = {ax: 0.0 for ax in AXES}
+            ur   = {ax: 0.0 for ax in AXES}
+            prev = {ax: 0.0 for ax in AXES}
             seen_lc: set[int] = set()
             for item in uid_items[uid]:
                 if item["type"] == "course" and item.get("cat_id"):
@@ -339,15 +343,24 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
                     sc = None
                 if sc is None:
                     sc = _keyword_scores(item["name"])
+                co = item.get("completed_on")
+                co_date = co.date() if co and hasattr(co, "date") else co
                 for ax in AXES:
-                    ur[ax] += float(sc.get(ax, 0))
+                    v = float(sc.get(ax, 0))
+                    ur[ax] += v
+                    if co_date and co_date < start_of_month:
+                        prev[ax] += v
+
+            this_norm = {ax: round(min(100.0, (ur[ax]   / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1) for ax in AXES}
+            last_norm = {ax: round(min(100.0, (prev[ax] / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1) for ax in AXES}
+            delta     = round(sum(this_norm[AXES[i]] - last_norm[AXES[i]] for i in range(5)) / 5)
 
             raw_scores[uid] = ur
             cache_entry = {
                 "axes":        AXES,
-                "this_month":  [round(min(100.0, (ur[ax] / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1) for ax in AXES],
-                "last_month":  [0] * 5,
-                "delta":       0,
+                "this_month":  [this_norm[ax] for ax in AXES],
+                "last_month":  [last_norm[ax] for ax in AXES],
+                "delta":       delta,
                 "scored_by":   "gpt",
                 "_raw_scores": ur,
             }

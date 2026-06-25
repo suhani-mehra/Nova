@@ -9,6 +9,11 @@ from core.database import query
 
 
 def calculate_streak(user_id: int, conn=None) -> dict:
+    from nova_db.gpt_cache import get_cache, set_cache
+    cached = get_cache(f"streak_{user_id}")
+    if cached:
+        return cached["result"]
+
     # Three-source union: any of these means the user was active on Classmate that day.
     # No duration threshold — the mere act of interacting with content is the signal.
     activity_rows = query(
@@ -86,10 +91,12 @@ def calculate_streak(user_id: int, conn=None) -> dict:
     active_30 = sum(1 for i in range(30) if (today - timedelta(days=i)) in active_days)
     active_90 = sum(1 for i in range(90) if (today - timedelta(days=i)) in active_days)
 
-    return {
+    result = {
         "current_streak":      streak,
         "week_map":            week_map,
         "learning_time":       learning_time,
         "active_days_last_30": active_30,
         "active_days_last_90": active_90,
     }
+    set_cache(f"streak_{user_id}", result, "computed", ttl_hours=1)
+    return result

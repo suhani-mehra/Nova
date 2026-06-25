@@ -181,6 +181,12 @@ def refresh_tier_scores_cache(force: bool = False) -> None:
             scores[uid] = round(tier_score, 2)
 
         upsert_tier_scores(scores)
+
+        # Cache global avg so calculate_tier() can use it without a Fabric query.
+        from nova_db.gpt_cache import set_cache
+        set_cache("company_avg_30d_credits", {"avg": global_avg_30d}, "computed", ttl_hours=25)
+        logger.info("Cached company_avg_30d_credits: %.4f", global_avg_30d)
+
         logger.info(
             "Tier score refresh complete — %d users, score range %.1f–%.1f",
             len(scores),
