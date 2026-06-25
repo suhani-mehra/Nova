@@ -12,7 +12,6 @@ function MgrOverview(){
     h('div',{className:'page-head'},
       h('h1',{className:'greeting'},'Learning Overview'),
       h('div',{className:'sub'},`Company-wide progress toward AI proficiency · ${M.total.toLocaleString()} employees`)),
-    // KPI row
     h('div',{className:'kpi-grid', style:{marginBottom:22}},
       M.kpis.map((k,i)=>h('div',{className:'kpi-card',key:i},
         h('div',{className:'top'},
@@ -21,18 +20,16 @@ function MgrOverview(){
         h('div',{className:'num'},k.num),
         h('div',{className:'lab',dangerouslySetInnerHTML:{__html:k.lab}})))
     ),
-    // line chart
     h('div',{className:'card', style:{marginBottom:22}},
       h('div',{className:'card-head-row', style:{marginBottom:16}},
         h('div',null,
-          h('div',{className:'card-title'},'Progress Toward the Goal'),
-          h('div',{className:'card-sub'},'Share of all employees who are AI-proficient, vs learning retention.')),
+          h('div',{className:'card-title'},'AI Proficiency Trend'),
+          h('div',{className:'card-sub'},'% of all employees with AI proficiency ≥ 60%, measured at each quarter end.')),
         h('div',{className:'goal-banner'}, Icons.target({size:16,color:'#A634FF'}),
           h('span',null,'Goal: ', h('b',null,'every employee AI-proficient')))),
       h(LineChart,{months:M.months, proficiency:M.series.proficiency, retention:M.series.retention, target:M.target, total:M.total}),
       h('div',{className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
-        h('div',{className:'it'}, h('span',{className:'sw',style:{background:'linear-gradient(90deg,#2ACCFF,#A634FF,#FF4398)'}}),'AI-proficient employees'),
-        h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#2ACCFF'}}),'Retention rate'),
+        h('div',{className:'it'}, h('span',{className:'sw',style:{background:'linear-gradient(90deg,#2ACCFF,#A634FF,#FF4398)'}}),'% AI-proficient employees'),
         h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#FF4398'}}),`Target ${M.target}%`))
     )
   );
@@ -69,46 +66,143 @@ function MgrTeams(){
 function MgrPeople(){
   const M=NOVA.manager;
   const [filter,setFilter]=useStateM('all');
-  const stLabel={ok:'Thriving', warn:'On track', risk:'At risk'};
+  const [searchQ,setSearchQ]=useStateM('');
+  const [searchResults,setSearchResults]=useStateM(null);
+  const [searching,setSearching]=useStateM(false);
+  const [searchScope,setSearchScope]=useStateM('');
+  const debounceRef=React.useRef(null);
+
   const filtered = M.people.filter(p=>{
     if(filter==='all') return true;
-    if(filter==='thriving') return p.status==='ok';
+    if(filter==='on_track') return p.status==='ok';
     if(filter==='risk') return p.status==='risk';
     return true;
   });
   const riskCount=M.people.filter(p=>p.status==='risk').length;
+
+  React.useEffect(()=>{
+    if(debounceRef.current) clearTimeout(debounceRef.current);
+    if(!searchQ.trim()){
+      setSearchResults(null);
+      setSearchScope('');
+      return;
+    }
+    debounceRef.current=setTimeout(async ()=>{
+      setSearching(true);
+      try{
+        const res=await apiGet('/api/manager/people/search?q='+encodeURIComponent(searchQ.trim()));
+        if(res){
+          setSearchResults(res.employees||[]);
+          setSearchScope(res.search_scope||'');
+        }
+      }catch(e){
+        console.warn('[Nova] search failed:',e);
+      }finally{
+        setSearching(false);
+      }
+    },350);
+  },[searchQ]);
+
+  const isSearching=searchQ.trim().length>0;
+  const displayList=isSearching?(searchResults||[]):filtered;
+
   return h('div',{className:'page'},
     h('div',{className:'page-head', style:{display:'flex',alignItems:'flex-end',justifyContent:'space-between',gap:16,flexWrap:'wrap'}},
       h('div',null,
         h('h1',{className:'greeting'},'Individual Progress'),
-        h('div',{className:'sub'},'Who is moving forward — and who needs a nudge.')),
-      h('div',{className:'seg'},
+        h('div',{className:'sub'},
+          isSearching
+            ? `${displayList.length} result${displayList.length===1?'':'s'} for "${searchQ}"`
+            : 'Who is moving forward — and who needs a nudge.'
+        )),
+      !isSearching && h('div',{className:'seg'},
         h('button',{className:filter==='all'?'on':'', onClick:()=>setFilter('all')},'All'),
-        h('button',{className:filter==='thriving'?'on':'', onClick:()=>setFilter('thriving')},'Thriving'),
+        h('button',{className:filter==='on_track'?'on':'', onClick:()=>setFilter('on_track')},'On track'),
         h('button',{className:filter==='risk'?'on':'', onClick:()=>setFilter('risk')},`At risk (${riskCount})`))),
+
+    h('div',{className:'people-search-wrap'},
+      h('input',{
+        type:'text',
+        placeholder:'Search employees…',
+        value:searchQ,
+        onChange:e=>setSearchQ(e.target.value),
+        style:{
+          width:'100%',
+          padding:'10px 16px 10px 40px',
+          borderRadius:12,
+          border:'1.5px solid var(--line)',
+          background:'var(--card)',
+          fontSize:14,
+          fontWeight:600,
+          color:'var(--ink)',
+          outline:'none',
+          boxSizing:'border-box',
+          transition:'border-color .15s',
+        }
+      }),
+      h('span',{style:{
+        position:'absolute',left:13,top:'50%',
+        transform:'translateY(-50%)',
+        color:'var(--muted)',
+        pointerEvents:'none',
+        display:'flex',
+      }}, Icons.search ? Icons.search({size:16}) : h('span',null,'🔍')),
+      searchQ && h('button',{
+        onClick:()=>{setSearchQ('');setSearchResults(null);},
+        style:{
+          position:'absolute',right:12,top:'50%',
+          transform:'translateY(-50%)',
+          background:'none',border:0,
+          color:'var(--muted)',fontSize:18,
+          cursor:'pointer',lineHeight:1,
+          padding:'0 2px',
+        }
+      },'\xD7')
+    ),
+
     h('div',{className:'card'},
+      searching && h('div',{style:{padding:'12px 16px',color:'var(--muted)',fontSize:14,fontWeight:600}},'Searching…'),
+      isSearching && !searching && searchScope==='recursive' &&
+        h('div',{className:'search-result-note'},
+          h('b',null,'Extended view:'),' showing all levels below you'),
+      isSearching && !searching && searchScope==='company' &&
+        h('div',{className:'search-result-note'},
+          h('b',null,'Exec view:'),' searching company-wide'),
+      isSearching && !searching && searchResults && searchResults.length===0 &&
+        h('div',{style:{padding:'24px 16px',color:'var(--muted)',fontSize:14,fontWeight:600,textAlign:'center'}},
+          'No employees found for "',searchQ,'"'),
       h('div',{className:'ppl-head'},
         h('div',null,'Employee'), h('div',null,'Tier'),
-        h('div',null,'AI proficiency'), h('div',null,'Trend'),
+        h('div',null,'AI proficiency'),
         h('div',{style:{textAlign:'right'}},'Status')),
-      filtered.map((p,i)=>{
-        const t=tierByKey(p.tier);
-        return h('div',{className:'ppl-row',key:i},
+      displayList.map((p,i)=>{
+        const tierKey=(p.tier&&p.tier!=='—')?p.tier:'starter';
+        const t=tierByKey(tierKey)||tierByKey('starter');
+        const isSearch=isSearching;
+        // prof comes from mapped people (p.prof) or raw search results (p.ai_proficiency).
+        // Status is purely proficiency-based: < 20% = at risk, otherwise on track.
+        const prof=(p.prof!=null)?p.prof:Math.round(p.ai_proficiency||0);
+        const atRisk=prof<20;
+        return h('div',{className:'ppl-row',key:p.user_id||i},
           h('div',{className:'who'},
-            h(Avatar,{name:p.name, grad:p.av, size:'s'}),
+            h(Avatar,{name:p.name, grad:p.av||['#A634FF','#FF4398'], size:'s'}),
             h('div',{style:{minWidth:0}},
               h('div',{className:'nm'},p.name),
-              h('div',{className:'rl'},`${p.role} · ${p.team}`))),
-          h('div',null, h('span',{className:'tier-pill'},
-            h(Hex,{color:t.color, glyph:tierHexInner(p.tier), active:false, size:24}),
-            h('span',{style:{color:t.color}}, t.name))),
+              h('div',{className:'rl'},isSearch
+                ? (p.department||'')+(p.designation?(' · '+p.designation):'')
+                : `${p.role||p.department||''} · ${p.team||p.department||''}`))),
+          h('div',null, t ? h('span',{className:'tier-pill'},
+            h(Hex,{color:t.color, glyph:tierHexInner(tierKey), active:false, size:24}),
+            h('span',{style:{color:t.color}}, p.tier==='—'?'—':t.name))
+            : h('span',null,'—')),
           h('div',{style:{display:'flex',alignItems:'center',gap:12}},
-            h('div',{className:'bar-wide',style:{flex:1,maxWidth:160}}, h('i',{style:{width:p.prof+'%',
-              background: p.status==='risk'?'linear-gradient(90deg,#E23D6E,#FF6B88)':'linear-gradient(90deg,#2ACCFF,#A634FF)'}})),
-            h('div',{className:'pct-strong',style:{width:42}}, p.prof+'%')),
-          h('div',null, h('span',{className:`trend-cell ${p.dir}`}, trendIco(p.dir), p.trend)),
+            h('div',{className:'bar-wide',style:{flex:1,maxWidth:160}}, h('i',{style:{width:prof+'%',
+              background: atRisk?'linear-gradient(90deg,#E23D6E,#FF6B88)':'linear-gradient(90deg,#2ACCFF,#A634FF)'}})),
+            h('div',{className:'pct-strong',style:{width:42}}, prof+'%')),
           h('div',{style:{textAlign:'right'}},
-            h('span',{className:`status ${p.status}`}, h('span',{className:'dot'}), stLabel[p.status])));
+            h('span',{className:`status ${atRisk?'risk':'ok'}`},
+              h('span',{className:'dot'}),
+              atRisk?'At risk':'On track')));
       })
     )
   );

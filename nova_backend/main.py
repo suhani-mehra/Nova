@@ -10,6 +10,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -286,4 +287,5 @@ class NoCacheStaticFiles(StaticFiles):
         return response
 
 
-app.mount("/", NoCacheStaticFiles(directory="static", html=True), name="static")
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "nova_frontend"
+app.mount("/", NoCacheStaticFiles(directory=str(FRONTEND_DIR), html=True), name="static")
