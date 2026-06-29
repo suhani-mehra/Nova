@@ -238,6 +238,10 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
     raw_scores: dict[int, dict[str, float]] = {}
 
     if uncached_uids:
+        # If any of the completion queries fails (transient Fabric error), we must NOT
+        # cache the resulting all-zero scores — doing so poisons the classify_{uid}
+        # cache for 24h. Track success and only write cache entries when every query ran.
+        queries_ok = True
         ph = ",".join("?" * len(uncached_uids))
         try:
             course_rows = query(
@@ -251,6 +255,7 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
         except Exception as exc:
             logger.warning("get_team_skill_scores courses failed: %s", exc)
             course_rows = []
+            queries_ok = False
         try:
             cert_rows = query(
                 f"""
@@ -268,6 +273,7 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
         except Exception as exc:
             logger.warning("get_team_skill_scores certs failed: %s", exc)
             cert_rows = []
+            queries_ok = False
         try:
             lc_rows = query(
                 f"""
@@ -288,6 +294,7 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
         except Exception as exc:
             logger.warning("get_team_skill_scores LC failed: %s", exc)
             lc_rows = []
+            queries_ok = False
 
         # Collect all unique (type, id) pairs across all users for a single batch SQLite lookup
         lookup_pairs: set[tuple[str, int]] = set()
@@ -356,15 +363,19 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
             delta     = round(sum(this_norm[AXES[i]] - last_norm[AXES[i]] for i in range(5)) / 5)
 
             raw_scores[uid] = ur
-            cache_entry = {
-                "axes":        AXES,
-                "this_month":  [this_norm[ax] for ax in AXES],
-                "last_month":  [last_norm[ax] for ax in AXES],
-                "delta":       delta,
-                "scored_by":   "gpt",
-                "_raw_scores": ur,
-            }
-            set_cache(f"classify_{uid}", cache_entry, "gpt", ttl_hours=24)
+            # Only persist to cache when every completion query succeeded. On a
+            # transient DB failure the scores are all-zero and caching them would
+            # poison classify_{uid} for 24h (and break the radar / AI proficiency).
+            if queries_ok:
+                cache_entry = {
+                    "axes":        AXES,
+                    "this_month":  [this_norm[ax] for ax in AXES],
+                    "last_month":  [last_norm[ax] for ax in AXES],
+                    "delta":       delta,
+                    "scored_by":   "gpt",
+                    "_raw_scores": ur,
+                }
+                set_cache(f"classify_{uid}", cache_entry, "gpt", ttl_hours=24)
 
     for uid, cached in cached_results.items():
         raw_scores[uid] = cached.get("_raw_scores", {ax: 0.0 for ax in AXES})

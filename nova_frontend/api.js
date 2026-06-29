@@ -98,6 +98,7 @@ function mapDashboard(data) {
       scoredBy:  data.skills.scored_by || 'keywords',
     },
     tierScoredBy:   data.tier?.scored_by || 'keywords',
+    congratsReceived: data.congrats_received ?? 0,
     badges: data.badges,
     continueCourse: data.continue_course ? {
       name:     data.continue_course.name,
@@ -135,6 +136,7 @@ function mapTeam(data) {
       timeDelta: data.highlights?.time_delta_pct ?? 0,
     },
     accomplishments: data.accomplishments.map(a => ({
+      user_id: a.user_id,
       name: a.employee_name,
       verb: 'completed',
       ach:  a.course_name,
@@ -196,8 +198,8 @@ function mapManager(data, teamsData, peopleData) {
       {
         key: 'ret',
         num: retRate.toFixed(0) + '%',
-        lab: 'Learning <b>retention rate</b>',
-        trend: _sign(retTrendPct) + retTrendPct.toFixed(0) + '%',
+        lab: 'Active learners <b>last 30 days</b>',
+        trend: _sign(retTrendPct) + retTrendPct.toFixed(0) + ' pts',
         dir:   retTrendDir,
         ic: 'shield',
         tint: 'rgba(31,169,113,.14)', col: '#1FA971',
@@ -205,9 +207,10 @@ function mapManager(data, teamsData, peopleData) {
       {
         key: 'risk',
         num: atRiskCount.toString(),
-        lab: 'Employees <b>falling behind</b>',
+        lab: 'Employees <b>at risk</b>',
         trend: _sign(atRiskTrendPct) + Math.abs(Math.round(atRiskTrendPct)) + '%',
         dir:   atRiskTrendDir,
+        badWhenUp: true,   // at-risk going up is bad → invert the trend chip color
         ic: 'alert',
         tint: 'rgba(226,61,110,.12)', col: '#E23D6E',
       },
@@ -215,7 +218,7 @@ function mapManager(data, teamsData, peopleData) {
     months: data.monthly_trend.map(m => m.month),
     series: {
       proficiency: data.monthly_trend.map(m => m.credits),
-      retention:   data.monthly_trend.map(m => m.retention ?? 0),
+      active:      data.monthly_trend.map(m => m.active_pct ?? 0),
     },
     distribution: [],
     teams: teamsData.departments.map((d, i) => {
@@ -375,6 +378,9 @@ async function initNova() {
     _resolveDataReady(); // unblock app.jsx; AppRoot will show the error screen
   }
 }
+
+// Expose gradient helper for use in JSX files loaded after api.js
+window._nameToGrad = _nameToGrad;
 
 // Delay initNova() slightly so the sign-in gate in app.jsx can check MSAL account first
 setTimeout(initNova, 100);

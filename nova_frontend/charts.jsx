@@ -19,7 +19,7 @@ function TierTrack({tiers, currentKey}){
 }
 
 /* ---------- Radar / skill chart ---------- */
-function RadarChart({axes, thisMonth, lastMonth, size=300}){
+function RadarChart({axes, thisMonth, lastMonth, compareWith=null, size=300}){
   const cx=size/2, cy=size/2+8, R=size*0.34, n=axes.length;
   const angle = i => (-90 + i*(360/n)) * Math.PI/180;
   const pt = (i,val) => [cx + Math.cos(angle(i))*R*(val/100), cy + Math.sin(angle(i))*R*(val/100)];
@@ -45,6 +45,8 @@ function RadarChart({axes, thisMonth, lastMonth, size=300}){
     }),
     // last month (dashed blue)
     h('polygon',{points:poly(lastMonth), fill:'rgba(42,204,255,.08)', stroke:'#2ACCFF', strokeWidth:2, strokeDasharray:'5 4'}),
+    // teammate compare ring (faint green dashed) — drawn before thisMonth so it sits behind
+    compareWith && h('polygon',{points:poly(compareWith), fill:'rgba(31,169,113,.07)', stroke:'#1FA971', strokeWidth:1.8, strokeDasharray:'4 4'}),
     // this month (gradient)
     h('polygon',{points:poly(thisMonth), fill:'url(#radarFill)', stroke:'#A634FF', strokeWidth:2.4}),
     thisMonth.map((v,i)=>{const[x,y]=pt(i,v);return h('circle',{key:'d'+i,cx:x,cy:y,r:3.4,fill:'#A634FF',stroke:'#fff',strokeWidth:1.6})})
@@ -52,7 +54,7 @@ function RadarChart({axes, thisMonth, lastMonth, size=300}){
 }
 
 /* ---------- Manager line chart ---------- */
-function LineChart({months, proficiency, retention, target, total}){
+function LineChart({months, proficiency, active, target, total}){
   const [hover,setHover]=_useState(null);
   const W=820, H=320, padL=44, padR=20, padT=22, padB=40;
   const ix = i => padL + i*( (W-padL-padR)/(months.length-1) );
@@ -82,8 +84,8 @@ function LineChart({months, proficiency, retention, target, total}){
       h('text',{x:W-padR,y:iy(target)-7,textAnchor:'end',fontSize:11,fontWeight:800,fill:'#FF4398'}, `Target ${target}%`),
       // x labels
       months.map((m,i)=>h('text',{key:'x'+i,x:ix(i),y:H-padB+22,textAnchor:'middle',fontSize:11.5,fontWeight:600,fill:'#9a9db4'}, m)),
-      // retention (dashed)
-      h('path',{d:linePath(retention),fill:'none',stroke:'#2ACCFF',strokeWidth:2.4,strokeDasharray:'6 5',strokeLinecap:'round'}),
+      // active learners (dashed)
+      h('path',{d:linePath(active),fill:'none',stroke:'#2ACCFF',strokeWidth:2.4,strokeDasharray:'6 5',strokeLinecap:'round'}),
       // proficiency
       h('path',{d:areaPath(proficiency),fill:'url(#profArea)'}),
       h('path',{d:linePath(proficiency),fill:'none',stroke:'url(#profLine)',strokeWidth:3.4,strokeLinecap:'round',strokeLinejoin:'round'}),
@@ -100,7 +102,7 @@ function LineChart({months, proficiency, retention, target, total}){
       h('div',{className:'row'}, h('span',{className:'dot',style:{background:'#A634FF'}}),
         `AI-proficient ${proficiency[hover]}% · ${Math.round(total*proficiency[hover]/100).toLocaleString()}`),
       h('div',{className:'row'}, h('span',{className:'dot',style:{background:'#2ACCFF'}}),
-        `Retention ${retention[hover]}%`)
+        `Active ${active[hover]}%`)
     )
   );
 }

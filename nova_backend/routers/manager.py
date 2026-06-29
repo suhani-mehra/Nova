@@ -324,8 +324,8 @@ _PLACEHOLDER_OVERVIEW = {
         "at_risk_count_trend_dir":  "flat",
     },
     "monthly_trend": [
-        {"month": "Q1 '25", "credits": 0.0, "retention": 0.0},
-        {"month": "Q2 '25", "credits": 0.0, "retention": 0.0},
+        {"month": "Q1 '25", "credits": 0.0, "active_pct": 0.0},
+        {"month": "Q2 '25", "credits": 0.0, "active_pct": 0.0},
     ],
     "at_risk": [],
 }
@@ -374,34 +374,19 @@ def _get_company_headcount() -> int:
 
 
 def _get_company_active_this_week() -> int:
-    rows = _query("""
-        SELECT COUNT(DISTINCT lc.user_id) AS cnt
-        FROM classmate.fact_classmate_learning_credit lc
-        JOIN (
-            SELECT DISTINCT user_id
-            FROM classmate.dim_classmate_employee_profile
-            WHERE etl_isactive=1 AND is_active=1 AND is_deleted=0 AND user_id IS NOT NULL
-        ) ep ON ep.user_id = lc.user_id
-        WHERE lc.is_deleted=0
-          AND lc.credit_date >= DATEADD(day,-7,GETDATE())
-    """)
-    return int(rows[0]["cnt"] or 0) if rows else 0
-
-
-def _get_company_active_prev_week() -> int:
-    rows = _query("""
-        SELECT COUNT(DISTINCT lc.user_id) AS cnt
-        FROM classmate.fact_classmate_learning_credit lc
-        JOIN (
-            SELECT DISTINCT user_id
-            FROM classmate.dim_classmate_employee_profile
-            WHERE etl_isactive=1 AND is_active=1 AND is_deleted=0 AND user_id IS NOT NULL
-        ) ep ON ep.user_id = lc.user_id
-        WHERE lc.is_deleted=0
-          AND lc.credit_date >= DATEADD(day,-14,GETDATE())
-          AND lc.credit_date <  DATEADD(day,-7,GETDATE())
-    """)
-    return int(rows[0]["cnt"] or 0) if rows else 0
+    """
+    Active learners this week = employees with at least one active day in the
+    current week, read from the streak cache (week_map). This matches how a
+    user's streak is defined (3-source activity union) rather than only counting
+    when learning credits happen to be awarded.
+    """
+    from nova_db.gpt_cache import get_cache
+    count = 0
+    for uid in _get_all_active_uids():
+        c = get_cache(f"streak_{uid}")
+        if c and any(c["result"].get("week_map") or []):
+            count += 1
+    return count
 
 
 def _get_company_avg_credits_this_quarter() -> float:
@@ -423,8 +408,12 @@ def _get_company_avg_credits_this_quarter() -> float:
 
 def _compute_company_overview_stats() -> dict:
     """
-    Bundles four company-wide metrics into one cached call (1 h TTL).
-    Called from manager_overview via asyncio.gather.
+    Bundles the company-wide overview metrics into one cached call.
+
+    The "active learners this week" trend compares the current streak-based count
+    against a weekly baseline (company_active_prev) — the same pattern used by the
+    at-risk count — since the streak cache only knows about the current week and
+    can't be diffed against a prior week directly.
     """
     from nova_db.gpt_cache import get_cache, set_cache
     CACHE_KEY = "company_overview_stats"
@@ -434,12 +423,25 @@ def _compute_company_overview_stats() -> dict:
     try:
         headcount   = _get_company_headcount()
         active_week = _get_company_active_this_week()
-        prev_week   = _get_company_active_prev_week()
         avg_credits = _get_company_avg_credits_this_quarter()
+
+        # Active-learners trend vs a weekly baseline (only set when absent; it
+        # expires after 7 days and the next run re-baselines).
+        prev_snap = get_cache("company_active_prev")
+        if prev_snap is not None:
+            prev_count = int(prev_snap["result"])
+            trend_pct  = round((active_week - prev_count) / max(prev_count, 1) * 100, 1)
+            trend_dir  = "up" if trend_pct > 0 else "down" if trend_pct < 0 else "flat"
+        else:
+            trend_pct = 0.0
+            trend_dir = "flat"
+            set_cache("company_active_prev", active_week, "computed", ttl_hours=24 * 7)
+
         result = {
             "headcount":                headcount,
             "active_this_week":         active_week,
-            "active_prev_week":         prev_week,
+            "active_week_trend_pct":    trend_pct,
+            "active_week_trend_dir":    trend_dir,
             "avg_credits_this_quarter": avg_credits,
         }
         set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
@@ -448,15 +450,17 @@ def _compute_company_overview_stats() -> dict:
         logger.warning("_compute_company_overview_stats failed: %s", exc)
         return {
             "headcount": 0, "active_this_week": 0,
-            "active_prev_week": 0, "avg_credits_this_quarter": 0.0,
+            "active_week_trend_pct": 0.0, "active_week_trend_dir": "flat",
+            "avg_credits_this_quarter": 0.0,
         }
 
 
 def _compute_company_retention() -> dict:
     """
-    Retention = % of learners active in [-60,-30] who also appear in [-30,0].
-    Trend     = current rate minus the same metric one window earlier.
-    Cached 6 h.
+    % active learners = share of all employees with any learning activity in the
+    last 30 days. Trend = this 30-day window vs the prior 30-day window
+    (this month vs last month), in percentage points.
+    Cache key kept as "retention_snapshot" / shape {rate, trend_pct, trend_dir}.
     """
     from nova_db.gpt_cache import get_cache, set_cache
     CACHE_KEY = "retention_snapshot"
@@ -471,42 +475,37 @@ def _compute_company_retention() -> dict:
             WHERE etl_isactive=1 AND is_active=1 AND is_deleted=0 AND user_id IS NOT NULL
         """)
         all_uids = {r["user_id"] for r in emp_rows if r["user_id"]}
+        headcount = len(all_uids)
 
         rows = _query("""
             SELECT DISTINCT user_id,
                 CASE
                     WHEN credit_date >= DATEADD(day,-30,GETDATE())
-                    THEN 'w0'
+                    THEN 'cur'
                     WHEN credit_date >= DATEADD(day,-60,GETDATE())
                          AND credit_date < DATEADD(day,-30,GETDATE())
-                    THEN 'w1'
-                    WHEN credit_date >= DATEADD(day,-90,GETDATE())
-                         AND credit_date < DATEADD(day,-60,GETDATE())
-                    THEN 'w2'
+                    THEN 'prev'
                 END AS window
             FROM classmate.fact_classmate_learning_credit
             WHERE is_deleted=0
-              AND credit_date >= DATEADD(day,-90,GETDATE())
+              AND credit_date >= DATEADD(day,-60,GETDATE())
               AND user_id IS NOT NULL
         """)
-        w0: set = set()
-        w1: set = set()
-        w2: set = set()
+        cur: set = set()
+        prev: set = set()
         for r in rows:
             uid = r["user_id"]
             if uid not in all_uids:
                 continue
-            w = r["window"]
-            if w == "w0":   w0.add(uid)
-            elif w == "w1": w1.add(uid)
-            elif w == "w2": w2.add(uid)
+            if r["window"] == "cur":    cur.add(uid)
+            elif r["window"] == "prev": prev.add(uid)
 
-        current_rate = round(len(w1 & w0) / len(w1) * 100, 1) if w1 else 0.0
-        prev_rate    = round(len(w2 & w1) / len(w2) * 100, 1) if w2 else 0.0
-        trend_pct    = round(current_rate - prev_rate, 1)
-        trend_dir    = "up" if trend_pct > 0 else "down" if trend_pct < 0 else "flat"
+        rate      = round(len(cur) / headcount * 100, 1) if headcount else 0.0
+        prev_rate = round(len(prev) / headcount * 100, 1) if headcount else 0.0
+        trend_pct = round(rate - prev_rate, 1)
+        trend_dir = "up" if trend_pct > 0 else "down" if trend_pct < 0 else "flat"
 
-        result = {"rate": current_rate, "trend_pct": trend_pct, "trend_dir": trend_dir}
+        result = {"rate": rate, "trend_pct": trend_pct, "trend_dir": trend_dir}
         set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
         return result
     except Exception as exc:
@@ -516,15 +515,17 @@ def _compute_company_retention() -> dict:
 
 def _compute_company_at_risk_count() -> dict:
     """
-    At risk = inactive ≥14 days AND credits < 50% of company avg,
-              OR inactive ≥30 days regardless.
+    At risk = weighted health score below 0.20, where
+        health = 0.7 * (AI proficiency / 100) + 0.3 * (active this week ? 1 : 0)
+    AI proficiency comes from the (cache-backed) team skill scores; active-this-week
+    comes from the streak cache (week_map).
     Returns {"count": int, "trend_pct": float, "trend_dir": str}.
     Trend compares against a weekly baseline stored in gpt_cache (7-day TTL).
     The baseline is only written when it doesn't already exist, so after one week
     it naturally resets and the next run becomes the new baseline.
-    Cached 6 h.
     """
     from nova_db.gpt_cache import get_cache, set_cache
+    from services.skill_service import get_team_skill_scores
     CACHE_KEY = "company_at_risk_count"
     cached = get_cache(CACHE_KEY)
     if cached:
@@ -533,50 +534,19 @@ def _compute_company_at_risk_count() -> dict:
             return result
 
     try:
-        emp_rows = _query("""
-            SELECT DISTINCT user_id FROM classmate.dim_classmate_employee_profile
-            WHERE etl_isactive=1 AND is_active=1 AND is_deleted=0 AND user_id IS NOT NULL
-        """)
-        all_uids = {r["user_id"] for r in emp_rows if r["user_id"]}
+        all_uids = _get_all_active_uids()
         if not all_uids:
             return {"count": 0, "trend_pct": 0.0, "trend_dir": "flat"}
 
-        last_rows = _query("""
-            SELECT user_id, MAX(credit_date) AS last_dt
-            FROM classmate.fact_classmate_learning_credit
-            WHERE is_deleted=0 AND user_id IS NOT NULL
-            GROUP BY user_id
-        """)
-        uid_last: dict = {}
-        for r in last_rows:
-            uid = r["user_id"]
-            if uid in all_uids and r["last_dt"]:
-                d = r["last_dt"]
-                uid_last[uid] = d.date() if hasattr(d, "date") else d
+        scores = get_team_skill_scores(all_uids)  # {uid: {"AI": 0..100, ...}}
 
-        credit_rows = _query("""
-            SELECT user_id, SUM(learning_credits) AS credits
-            FROM classmate.vw_classmate_trainings
-            WHERE status=4052 AND completed_on >= DATEADD(day,-90,GETDATE())
-              AND user_id IS NOT NULL
-            GROUP BY user_id
-        """)
-        uid_credits: dict = {
-            r["user_id"]: float(r["credits"] or 0)
-            for r in credit_rows if r["user_id"] in all_uids
-        }
-
-        all_creds = list(uid_credits.values()) or [0.0]
-        avg_c = sum(all_creds) / len(all_creds)
-        threshold = max(avg_c * 0.5, 2.5)
-
-        today = date.today()
         count = 0
         for uid in all_uids:
-            last = uid_last.get(uid)
-            days_inactive = (today - last).days if last else 999
-            q_credits = uid_credits.get(uid, 0.0)
-            if (days_inactive >= 14 and q_credits < threshold) or days_inactive >= 30:
+            ai = scores.get(uid, {}).get("AI", 0.0)
+            sc = get_cache(f"streak_{uid}")
+            active = bool(sc and any(sc["result"].get("week_map") or []))
+            health = 0.7 * (ai / 100.0) + 0.3 * (1.0 if active else 0.0)
+            if health < 0.20:
                 count += 1
 
         # Trend vs weekly baseline (only set baseline when it has expired)
@@ -609,8 +579,8 @@ def _quarter_start(q_end: date) -> date:
 
 def _compute_quarterly_ai_proficiency() -> list:
     """
-    Computes 6 quarters of AI proficiency % AND retention % across all active employees.
-    Returns [{"month": "Q3 '24", "credits": 12.5, "retention": 67.3}, ...] — cached 24 h.
+    Computes 6 quarters of AI proficiency % AND % active learners across all active employees.
+    Returns [{"month": "Q3 '24", "credits": 12.5, "active_pct": 67.3}, ...] — cached 25 h.
     """
     global _trend_computing
     from nova_db.gpt_cache import get_cache, set_cache
@@ -763,52 +733,30 @@ def _compute_quarterly_ai_proficiency() -> list:
                 user_active_in_quarter[label].add(uid)
                 break
 
-    # Retention per quarter = % of previous quarter's active users who returned.
-    # quarters[0] (warm-up) has no predecessor so it stays 0 — that value is
-    # never included in the result, so it's only used as the denominator for
-    # the first displayed quarter's retention computation.
-    quarter_retention: dict = {}
-    for i, (label, _) in enumerate(quarters):
-        if i == 0:
-            quarter_retention[label] = 0.0
-        else:
-            prev_label  = quarters[i - 1][0]
-            prev_active = user_active_in_quarter[prev_label]
-            curr_active = user_active_in_quarter[label]
-            quarter_retention[label] = (
-                round(len(prev_active & curr_active) / len(prev_active) * 100, 1)
-                if prev_active else 0.0
-            )
-
-    # Build result — skip the warm-up quarter (index 0), display the last 6
+    # Build result — skip the warm-up quarter (index 0), display the last 6.
+    # Second line is % active learners = share of employees with any learning
+    # activity in that quarter.
     result = []
     for label, cutoff in quarters[1:]:
         proficient = sum(
             1 for uid in all_uids
             if min(100.0, math.sqrt(
                 sum(v for d, v in user_ai[uid] if d <= cutoff) / MASTERY_THRESHOLD
-            ) * 100) >= 60.0
+            ) * 100) >= 45.0
         )
         pct = round(proficient / total * 100, 1)
+        active_pct = round(len(user_active_in_quarter[label]) / total * 100, 1)
         result.append({
-            "month":     label,
-            "credits":   pct,
-            "retention": quarter_retention.get(label, 0.0),
+            "month":      label,
+            "credits":    pct,
+            "active_pct": active_pct,
         })
 
-    # If the warm-up quarter had too few users, the first displayed quarter's
-    # retention is unreliable (near-zero due to low prior-period baseline rather
-    # than actual churn). Backfill it with Q2's value so the line starts flat.
-    warmup_label = quarters[0][0]
-    warmup_users = len(user_active_in_quarter[warmup_label])
-    if len(result) >= 2 and warmup_users < total * 0.10:
-        result[0]["retention"] = result[1]["retention"]
-
     logger.info(
-        "ai_proficiency_trend: complete — %d employees, latest: %.1f%% AI-proficient, %.1f%% retention",
+        "ai_proficiency_trend: complete — %d employees, latest: %.1f%% AI-proficient, %.1f%% active",
         total,
         result[-1]["credits"] if result else 0.0,
-        result[-1]["retention"] if result else 0.0,
+        result[-1]["active_pct"] if result else 0.0,
     )
     set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
     _trend_computing = False
@@ -823,7 +771,7 @@ def _default_quarterly_trend() -> list:
     quarters = []
     for _ in range(6):
         label = f"Q{q_idx + 1} '{str(yr)[2:]}"
-        quarters.append({"month": label, "credits": 0.0, "retention": 0.0})
+        quarters.append({"month": label, "credits": 0.0, "active_pct": 0.0})
         q_idx -= 1
         if q_idx < 0:
             q_idx = 3
@@ -1136,7 +1084,8 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
         overview_stats = _swr(
             "company_overview_stats", _compute_company_overview_stats,
             {"headcount": 0, "active_this_week": 0,
-             "active_prev_week": 0, "avg_credits_this_quarter": 0.0},
+             "active_week_trend_pct": 0.0, "active_week_trend_dir": "flat",
+             "avg_credits_this_quarter": 0.0},
         )
         retention = _swr(
             "retention_snapshot", _compute_company_retention,
@@ -1160,7 +1109,6 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
 
         headcount   = overview_stats["headcount"]
         active_week = overview_stats["active_this_week"]
-        prev_week   = overview_stats["active_prev_week"]
 
         if cached_trend and cached_trend["result"]:
             trend_list    = cached_trend["result"]
@@ -1175,11 +1123,8 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
             ai_prof_count = 0
             ai_trend_pts  = 0.0
 
-        active_trend_pct = (
-            round((active_week - prev_week) / prev_week * 100, 1)
-            if prev_week > 0
-            else (0.0 if active_week == 0 else 100.0)
-        )
+        active_trend_pct = overview_stats.get("active_week_trend_pct", 0.0)
+        active_trend_dir = overview_stats.get("active_week_trend_dir", "flat")
 
         at_risk_count_num  = at_risk_count.get("count", 0)
         at_risk_trend_pct  = at_risk_count.get("trend_pct", 0.0)
@@ -1201,6 +1146,7 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
             "retention_rate_trend_dir": retention["trend_dir"],
             "ai_proficiency_trend_pts": ai_trend_pts,
             "active_week_trend_pct":    active_trend_pct,
+            "active_week_trend_dir":    active_trend_dir,
             "at_risk_count_company":    at_risk_count_num,
             "at_risk_count_trend_pct":  at_risk_trend_pct,
             "at_risk_count_trend_dir":  at_risk_trend_dir,

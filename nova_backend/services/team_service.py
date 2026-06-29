@@ -151,6 +151,7 @@ def get_team_accomplishments(
         )
     return [
         {
+            "user_id":         r["user_id"],
             "employee_name":   r["employee_name"],
             "course_name":     r["course_name"],
             "completed_on":    str(r["completed_on"])[:10] if r["completed_on"] else None,

@@ -16,7 +16,7 @@ function MgrOverview(){
       M.kpis.map((k,i)=>h('div',{className:'kpi-card',key:i},
         h('div',{className:'top'},
           h('div',{className:'ic',style:{background:k.tint,color:k.col}}, (kpiIc[k.ic]||Icons.spark)({size:22,color:k.col})),
-          h('div',{className:`trend ${k.dir}`}, trendIco(k.dir), k.trend)),
+          h('div',{className:`trend ${k.dir}${k.badWhenUp?' invert':''}`}, trendIco(k.dir), k.trend)),
         h('div',{className:'num'},k.num),
         h('div',{className:'lab',dangerouslySetInnerHTML:{__html:k.lab}})))
     ),
@@ -24,12 +24,13 @@ function MgrOverview(){
       h('div',{className:'card-head-row', style:{marginBottom:16}},
         h('div',null,
           h('div',{className:'card-title'},'AI Proficiency Trend'),
-          h('div',{className:'card-sub'},'% of all employees with AI proficiency ≥ 60%, measured at each quarter end.')),
+          h('div',{className:'card-sub'},'% of all employees with AI proficiency ≥ 45%, measured at each quarter end.')),
         h('div',{className:'goal-banner'}, Icons.target({size:16,color:'#A634FF'}),
           h('span',null,'Goal: ', h('b',null,'every employee AI-proficient')))),
-      h(LineChart,{months:M.months, proficiency:M.series.proficiency, retention:M.series.retention, target:M.target, total:M.total}),
+      h(LineChart,{months:M.months, proficiency:M.series.proficiency, active:M.series.active, target:M.target, total:M.total}),
       h('div',{className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
         h('div',{className:'it'}, h('span',{className:'sw',style:{background:'linear-gradient(90deg,#2ACCFF,#A634FF,#FF4398)'}}),'% AI-proficient employees'),
+        h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#2ACCFF'}}),'% active learners'),
         h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#FF4398'}}),`Target ${M.target}%`))
     )
   );

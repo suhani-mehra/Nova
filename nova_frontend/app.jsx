@@ -59,8 +59,7 @@ function ProfileMenu({account, onSwitch}){
 
 const TABS = {
   employee: [
-    {id:'progress', label:'My Progress'},
-    {id:'team',     label:'My Team'},
+    {id:'employee', label:'My Learning'},
   ],
   manager: [
     {id:'overview', label:'Overview'},
@@ -154,7 +153,15 @@ function ExecDevPanel({ myId }) {
 }
 
 function TopKPI({account}){
-  if(account==='employee') return null;
+  if(account==='employee'){
+    const E = window.NOVA && window.NOVA.employee;
+    if(!E) return null;
+    return h('div',{className:'streak-topbar'},
+      h('div',{className:'streak-topbar-flame'},'🔥'),
+      h('div',{className:'streak-topbar-num'},E.streak),
+      h('div',{className:'streak-topbar-lab'},'day streak')
+    );
+  }
   return h('div',{className:'kpi-pill'},
     h('div',{className:'ic',style:{background:'rgba(42,204,255,.12)',color:'#0f8fc4'}}, Icons.users({size:19})),
     h('div',null, h('div',{className:'lab'},'Active Learners This Week'), h('div',{className:'val'},(window.NOVA?.manager?.kpis?.[1]?.num)||'—')));
@@ -200,8 +207,7 @@ function App(){
   };
 
   const render=()=>{
-    if (tab === 'progress') return h(MyProgress);
-    if (tab === 'team') return h(MyTeam);
+    if (tab === 'employee') return h(MyEmployee);
     if (tab === 'overview') return h(MgrOverview);
     if (tab === 'teams') return h(MgrTeams);
     return h(MgrPeople);
@@ -217,7 +223,7 @@ function App(){
           h('div',{className:'word'},'Nova'),
           h('div',{className:'sub'},'by Orion'))),
       h('div',{className:'tabs-wrap'},
-        h('nav',{className:'tabs'},
+        tabs.length > 1 && h('nav',{className:'tabs'},
           tabs.map(t=>h('button',{key:t.id, className:'tab'+(tab===t.id?' active':''),
             onClick:()=>setTab(t.id)}, t.label)))),
       h('div',{className:'right'},

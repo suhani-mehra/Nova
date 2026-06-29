@@ -14,10 +14,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from core.auth import CurrentUser, get_current_user
 from core.database import query
+from core.queries import get_direct_reports
 from nova_db.badges import get_user_badges
+from nova_db.congrats import get_congrats_received_count
 from services.tier_service import calculate_tier
 from services.streak_service import calculate_streak
-from services.skill_service import calculate_skill_radar
+from services.skill_service import calculate_skill_radar, get_team_skill_scores
 from services.recommendation_service import get_recommendation
 from services.team_service import (
     get_team_highlights,
@@ -400,6 +402,7 @@ async def employee_dashboard(user: CurrentUser = Depends(get_current_user)):
             "scored_by": recommended.get("scored_by", "keywords"),
         },
         "badges": get_user_badges(uid),
+        "congrats_received": get_congrats_received_count(uid),
     }
 
 
@@ -457,3 +460,59 @@ async def employee_team(user: CurrentUser = Depends(get_current_user)):
         "highlights":         highlights,
         "congrats_this_week": congrats_count,
     }
+
+
+@router.get("/employee/teammates")
+async def employee_teammates(user: CurrentUser = Depends(get_current_user)):
+    """Return all active teammates (direct reports of the same manager) for the compare picker."""
+    if user.classmate_user_id is None:
+        raise HTTPException(status_code=503, detail="No user identity")
+    uid = user.classmate_user_id
+    manager_id = await _run(_get_manager_id, uid)
+    if manager_id is None:
+        return {"teammates": []}
+    reports = await _run(get_direct_reports, None, manager_id)
+    # Exclude the requesting user themselves
+    teammates = [{"user_id": r["user_id"], "name": r["name"]} for r in reports if r["user_id"] != uid]
+    return {"teammates": teammates}
+
+
+@router.get("/employee/compare/{target_user_id}")
+async def employee_compare(target_user_id: int, user: CurrentUser = Depends(get_current_user)):
+    """Return skill radar data for a teammate so the frontend can overlay it on the user's own radar."""
+    if user.classmate_user_id is None:
+        raise HTTPException(status_code=503, detail="No user identity")
+
+    uid = user.classmate_user_id
+
+    # Validate: both users must share the same manager (i.e. be on the same team).
+    my_manager     = await _run(_get_manager_id, uid)
+    their_manager  = await _run(_get_manager_id, target_user_id)
+    if my_manager is None or my_manager != their_manager:
+        raise HTTPException(status_code=403, detail="Not on the same team")
+
+    # Fetch the target's name and 5-axis skill scores.
+    name_rows = await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: query(
+            """
+            WITH lp AS (
+                SELECT display_name, user_id,
+                       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY modified_on DESC) AS rn
+                FROM classmate.dim_classmate_employee_profile
+                WHERE etl_isactive = 1 AND is_active = 1 AND is_deleted = 0
+            )
+            SELECT display_name FROM lp WHERE rn = 1 AND user_id = ?
+            """,
+            (target_user_id,),
+        ),
+    )
+    name = name_rows[0]["display_name"] if name_rows else f"User {target_user_id}"
+
+    scores_map = await _run(get_team_skill_scores, [target_user_id])
+    user_scores = scores_map.get(target_user_id, {})
+
+    axes   = ["AI", "Cloud", "Frontend", "Backend", "Data"]
+    values = [round(user_scores.get(ax, 0.0), 1) for ax in axes]
+
+    return {"name": name, "axes": axes, "scores": values}

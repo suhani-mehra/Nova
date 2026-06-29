@@ -34,7 +34,19 @@ def init_db():
 
 
 def save_congrats(sender_user_id: int, receiver_user_id: int, activity_id: int, message: str) -> int:
+    """Record a congrats. Idempotent on (sender, receiver, activity_id) so a user
+    re-congratulating the same accomplishment doesn't inflate the recipient's count.
+    Returns the row id (existing one if it was already recorded)."""
     with _get_conn() as conn:
+        existing = conn.execute(
+            """
+            SELECT id FROM congrats
+            WHERE sender_user_id = ? AND receiver_user_id = ? AND activity_id = ?
+            """,
+            (sender_user_id, receiver_user_id, activity_id),
+        ).fetchone()
+        if existing:
+            return existing["id"]
         cur = conn.execute(
             """
             INSERT INTO congrats (sender_user_id, receiver_user_id, activity_id, message)
@@ -44,6 +56,16 @@ def save_congrats(sender_user_id: int, receiver_user_id: int, activity_id: int, 
         )
         conn.commit()
         return cur.lastrowid
+
+
+def get_congrats_received_count(user_id: int) -> int:
+    """All-time count of congrats received by user_id."""
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM congrats WHERE receiver_user_id = ?",
+            (user_id,),
+        ).fetchone()
+    return int(row["n"]) if row else 0
 
 
 def get_congrats_for_user(user_id: int, days: int = 7) -> list[dict]:
