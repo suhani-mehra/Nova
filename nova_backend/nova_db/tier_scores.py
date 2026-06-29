@@ -90,7 +90,10 @@ def refresh_tier_scores_cache(force: bool = False) -> None:
         from core.database import query
         from services.skill_service import get_team_skill_scores
 
-        # Query 1: All users' total completed credits
+        # Query 1: All users' total completed credits. The population for percentile
+        # ranking is "people who do training" (active learners) — NOT every employee.
+        # Adding zero-activity employees would only inflate active learners' percentiles
+        # (more bodies below them) and push MORE people into the top tiers.
         credit_rows = query(
             """
             SELECT user_id, ISNULL(SUM(learning_credits), 0) AS tc
@@ -164,13 +167,16 @@ def refresh_tier_scores_cache(force: bool = False) -> None:
 
             credits_score     = round(min(tc / 500 * 100, 100), 1)
             consistency_score = round(active_days_90 / 90 * 100, 1)
-            recency_score     = round(min(recency_30d / global_avg_30d * 50, 100), 1)
+            # Recency: average earner scores 50; 3x average = 100 (not 2x, to prevent
+            # trivial inflation when the company average is very low).
+            recency_score     = round(min(recency_30d / global_avg_30d / 3 * 100, 100), 1)
 
             if uid in skill_map:
                 skill_vals = [v for k, v in skill_map[uid].items() if not k.startswith("_")]
                 skill_score = round(sum(skill_vals) / max(len(skill_vals), 1), 1)
             else:
-                skill_score = 50.0
+                # Unknown skill — don't gift 50 points, treat as 0 to avoid inflating tier
+                skill_score = 0.0
 
             tier_score = (
                 credits_score     * 0.30
@@ -182,10 +188,24 @@ def refresh_tier_scores_cache(force: bool = False) -> None:
 
         upsert_tier_scores(scores)
 
-        # Cache global avg so calculate_tier() can use it without a Fabric query.
+        # Cache global avg so compute_and_cache_tiers() / calculate_tier() can use
+        # it without a Fabric query. Must be set BEFORE caching tiers below.
         from nova_db.gpt_cache import set_cache
         set_cache("company_avg_30d_credits", {"avg": global_avg_30d}, "computed", ttl_hours=25)
         logger.info("Cached company_avg_30d_credits: %.4f", global_avg_30d)
+
+        # Single source of truth: write the full tier_{uid} dict for every user,
+        # ranked against the population we just built. Reuse the already-computed
+        # population scores and skill map so this adds no extra Fabric queries.
+        # Both the employee dashboard and manager view read these cached dicts.
+        from services.tier_service import compute_and_cache_tiers
+        compute_and_cache_tiers(
+            all_uids,
+            population_scores=scores,
+            skill_norm=skill_map,
+            inputs=(credits_map, recency_map, consistency_map),
+        )
+        logger.info("Cached full tier dicts for %d users", len(all_uids))
 
         logger.info(
             "Tier score refresh complete — %d users, score range %.1f–%.1f",
