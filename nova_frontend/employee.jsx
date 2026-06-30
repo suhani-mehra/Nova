@@ -209,10 +209,7 @@ function MyEmployee(){
                 h('div',null,
                   h('div',{className:'course-name'},E.continueCourse.name),
                   h('div',{className:'course-meta', style:{color:'#FF4398'}},E.continueCourse.status))),
-              h('div',{style:{display:'flex',alignItems:'center',gap:12,margin:'18px 0'}},
-                h('div',{className:'pbar', style:{flex:1}}, h('i',{style:{width:E.continueCourse.progress+'%'}})),
-                h('div',{style:{fontWeight:700,fontSize:13.5,color:'var(--ink-soft)'}},`${E.continueCourse.progress}% Complete`)),
-              h('a',{className:'btn-grad',href:'https://learning.orioninc.com/OVSP/Dashboard',target:'_blank',rel:'noopener noreferrer',style:{textDecoration:'none',display:'block',textAlign:'center'}},'Continue Learning'))
+              h('a',{className:'btn-grad',href:'https://learning.orioninc.com/OVSP/Dashboard',target:'_blank',rel:'noopener noreferrer',style:{textDecoration:'none',display:'block',textAlign:'center',marginTop:18}},'Continue Learning'))
           : h('div',{className:'card'},
               h('div',{className:'card-title'},'Continue Learning'),
               h('div',{style:{color:'var(--muted)',fontSize:14,padding:'18px 0'}},'No course in progress. Browse the library to get started.'),
