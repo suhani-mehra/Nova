@@ -4,10 +4,35 @@ Tier ranking and score calculation for Nova.
 """
 
 import logging
+from datetime import date
 from core.database import query
 from core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ── Month windowing ───────────────────────────────────────────────────────────
+# The tier is a MONTHLY competition: credits/recency/consistency window to a
+# calendar month (reset on the 1st); skill stays all-time. A `target_month` is a
+# date on the 1st of the month being scored; callers default to the current month.
+
+def _current_month() -> date:
+    return date.today().replace(day=1)
+
+
+def _month_bounds(target_month: date) -> tuple[str, str, int]:
+    """(start_iso, end_excl_iso, days_in_month) for the calendar month that
+    `target_month` falls in. Bounds are passed to SQL as `>= start AND < end`."""
+    start = target_month.replace(day=1)
+    if start.month == 12:
+        end_excl = start.replace(year=start.year + 1, month=1)
+    else:
+        end_excl = start.replace(month=start.month + 1)
+    return start.isoformat(), end_excl.isoformat(), (end_excl - start).days
+
+
+def _month_str(d: date) -> str:
+    return d.strftime("%Y-%m")
 
 
 def _percentile_to_tier(percentile: float) -> tuple[str, str]:
@@ -84,23 +109,27 @@ def _global_avg_30d() -> float:
     return 1.0
 
 
-def _batch_tier_inputs(uids: list[int]) -> tuple[dict, dict, dict]:
-    """Three batched Fabric queries for a set of users: all-time completed
-    credits, 30-day recency credits, and 90-day distinct active days. Users with
-    no rows default to zero downstream."""
+def _batch_tier_inputs(uids: list[int], target_month: date | None = None) -> tuple[dict, dict, dict]:
+    """Three batched Fabric queries for a set of users, all windowed to the
+    calendar month `target_month` (defaults to the current month): completed
+    credits, recency credits, and distinct active days within that month. Users
+    with no rows default to zero downstream. Skill is NOT fetched here — it stays
+    all-time (see compute_and_cache_tiers)."""
     credits_map: dict[int, float] = {}
     recency_map: dict[int, float] = {}
     active_map:  dict[int, int]   = {}
     if not uids:
         return credits_map, recency_map, active_map
 
+    start, end_excl, _ = _month_bounds(target_month or _current_month())
     ph = ",".join("?" * len(uids))
     try:
         rows = query(
             f"SELECT user_id, ISNULL(SUM(learning_credits),0) AS tc "
             f"FROM classmate.vw_classmate_trainings "
-            f"WHERE user_id IN ({ph}) AND status=4052 GROUP BY user_id",
-            tuple(uids),
+            f"WHERE user_id IN ({ph}) AND status=4052 "
+            f"  AND completed_on >= ? AND completed_on < ? GROUP BY user_id",
+            tuple(uids) + (start, end_excl),
         )
         credits_map = {int(r["user_id"]): float(r["tc"] or 0) for r in rows}
     except Exception as exc:
@@ -110,14 +139,14 @@ def _batch_tier_inputs(uids: list[int]) -> tuple[dict, dict, dict]:
             f"SELECT user_id, ISNULL(SUM(value),0) AS c30 "
             f"FROM classmate.fact_classmate_learning_credit "
             f"WHERE user_id IN ({ph}) AND is_deleted=0 "
-            f"  AND credit_date >= DATEADD(day,-30,GETDATE()) GROUP BY user_id",
-            tuple(uids),
+            f"  AND credit_date >= ? AND credit_date < ? GROUP BY user_id",
+            tuple(uids) + (start, end_excl),
         )
         recency_map = {int(r["user_id"]): float(r["c30"] or 0) for r in rows}
     except Exception as exc:
         logger.warning("tier inputs: recency query failed: %s", exc)
     try:
-        # 90-day window ending today inclusive — matches calculate_streak's count.
+        # Distinct active days WITHIN the target month.
         rows = query(
             f"""SELECT user_id, COUNT(DISTINCT activity_date) AS ad90
             FROM (
@@ -134,10 +163,9 @@ def _batch_tier_inputs(uids: list[int]) -> tuple[dict, dict, dict]:
                 WHERE user_id IN ({ph}) AND status=2 AND is_deleted=0
             ) src
             WHERE activity_date IS NOT NULL
-              AND activity_date >= CAST(DATEADD(day,-89,GETDATE()) AS DATE)
-              AND activity_date <= CAST(GETDATE() AS DATE)
+              AND activity_date >= ? AND activity_date < ?
             GROUP BY user_id""",
-            tuple(uids) * 3,
+            tuple(uids) * 3 + (start, end_excl),
         )
         active_map = {int(r["user_id"]): int(r["ad90"] or 0) for r in rows}
     except Exception as exc:
@@ -147,16 +175,20 @@ def _batch_tier_inputs(uids: list[int]) -> tuple[dict, dict, dict]:
 
 
 def compute_and_cache_tiers(uids, population_scores=None, skill_norm=None,
-                            inputs=None) -> dict:
+                            inputs=None, target_month=None, write_cache=True,
+                            recency_avg=None) -> dict:
     """THE single place that computes a tier and writes tier_{uid}.
 
-    Computes the full tier dict for each uid, ranks its tier_score against the
+    Computes the MONTHLY tier dict for each uid (credits/recency/consistency
+    windowed to `target_month`, skill all-time), ranks its tier_score against the
     population (user_tier_scores), and caches it (26h TTL). Returns {uid: dict}.
 
     Callers may pass `population_scores`, `skill_norm`, and `inputs` (a
     (credits_map, recency_map, active_map) tuple) to avoid re-querying — e.g.
     refresh_tier_scores_cache passes everything it already computed so this adds
-    no extra Fabric load."""
+    no extra Fabric load. `target_month` defaults to the current month; the badge
+    job passes a prior month with `write_cache=False` so it never overwrites the
+    live tier_{uid} cache."""
     from nova_db.gpt_cache import set_cache
     from nova_db.tier_scores import get_all_tier_scores
     from services.skill_service import get_team_skill_scores
@@ -164,6 +196,9 @@ def compute_and_cache_tiers(uids, population_scores=None, skill_norm=None,
     uids = [int(u) for u in uids]
     if not uids:
         return {}
+
+    tm = target_month or _current_month()
+    _, _, days_in_month = _month_bounds(tm)
 
     if population_scores is None:
         population_scores = get_all_tier_scores()
@@ -173,8 +208,11 @@ def compute_and_cache_tiers(uids, population_scores=None, skill_norm=None,
     if inputs is not None:
         credits_map, recency_map, active_map = inputs
     else:
-        credits_map, recency_map, active_map = _batch_tier_inputs(uids)
-    avg = _global_avg_30d()
+        credits_map, recency_map, active_map = _batch_tier_inputs(uids, tm)
+    # Recency denominator must match the population being ranked. The badge job
+    # passes the prior month's average explicitly; the live path uses the cached
+    # (current-month) average written by refresh_tier_scores_cache.
+    avg = recency_avg if recency_avg is not None else _global_avg_30d()
 
     if skill_norm is None:
         try:
@@ -189,8 +227,10 @@ def compute_and_cache_tiers(uids, population_scores=None, skill_norm=None,
         u30  = recency_map.get(uid, 0.0)
         ad90 = active_map.get(uid, 0)
 
-        credits_score     = round(min(tc / 500 * 100, 100), 1)
-        consistency_score = round(ad90 / 90 * 100, 1)
+        # Monthly normalisation: credits vs a monthly target, consistency vs the
+        # days in the month, recency vs the (monthly) company average.
+        credits_score     = round(min(tc / settings.monthly_credit_target * 100, 100), 1)
+        consistency_score = round(min(ad90 / days_in_month * 100, 100), 1)
         recency_score     = round(min(u30 / avg / 3 * 100, 100), 1)
         if uid in skill_norm:
             skill_score = round(
@@ -227,7 +267,8 @@ def compute_and_cache_tiers(uids, population_scores=None, skill_norm=None,
             "recency_score":     recency_score,
             "scored_by":         scored_by,
         }
-        set_cache(f"tier_{uid}", result, "batch", ttl_hours=_TIER_CACHE_TTL_HOURS)
+        if write_cache:
+            set_cache(f"tier_{uid}", result, "batch", ttl_hours=_TIER_CACHE_TTL_HOURS)
         out[uid] = result
 
     return out
@@ -282,6 +323,44 @@ def calculate_tier(user_id: int) -> dict:
     # Still missing (e.g. user not in the active-employee list) — compute just this one.
     out = compute_and_cache_tiers([user_id])
     return out.get(user_id, dict(_STARTER_TIER))
+
+
+def award_monthly_badges(target_month: date, awarded_at: str | None = None) -> int:
+    """Award each active learner a badge equal to the tier they ENDED
+    `target_month` with (a completed calendar month). 'starter' is never awarded.
+    Idempotent — user_badges has UNIQUE(user_id, month), so re-runs are no-ops.
+
+    Computes the month's FINAL tiers via the shared population helper with
+    write_cache=False, so it never overwrites the live (current-month) tier cache."""
+    from nova_db.tier_scores import _compute_population_scores
+    from nova_db.badges import award_badge
+
+    computed = _compute_population_scores(target_month)
+    if computed is None:
+        logger.warning("award_monthly_badges: no population for %s", _month_str(target_month))
+        return 0
+    all_uids, scores, skill_map, inputs, monthly_avg = computed
+
+    tiers = compute_and_cache_tiers(
+        all_uids,
+        population_scores=scores,
+        skill_norm=skill_map,
+        inputs=inputs,
+        target_month=target_month,
+        write_cache=False,
+        recency_avg=monthly_avg,
+    )
+
+    month = _month_str(target_month)
+    at = awarded_at or date.today().isoformat()
+    awarded = 0
+    for uid, td in tiers.items():
+        tier = td.get("current_tier")
+        if tier and tier != "starter":
+            award_badge(uid, tier, month, at)
+            awarded += 1
+    logger.info("award_monthly_badges %s: awarded %d non-starter badges", month, awarded)
+    return awarded
 
 
 def get_all_user_tiers() -> dict:

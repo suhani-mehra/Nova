@@ -80,6 +80,26 @@ const TIER_META = {
   platinum: { name: 'Platinum', color: '#A634FF', tile: ['#A634FF', '#FF4398'] },
 };
 
+// Best → worst ordering and Ribbon glyph per tier (starter is never a badge).
+const TIER_RANK  = { platinum: 5, diamond: 4, gold: 3, silver: 2, bronze: 1 };
+const TIER_GLYPH = { platinum: 'crown', diamond: 'diamond', gold: 'star', silver: 'star', bronze: 'star' };
+
+// Group raw badge rows [{tier, month, ...}] into per-tier columns for the UI:
+// [{tier, count, color, glyph}] sorted best → worst, excluding starter.
+function _mapBadges(rows) {
+  const counts = {};
+  (rows || []).forEach(function (b) {
+    const t = b.tier;
+    if (!t || t === 'starter' || !(t in TIER_RANK)) return;
+    counts[t] = (counts[t] || 0) + 1;
+  });
+  return Object.keys(counts)
+    .sort(function (a, b) { return TIER_RANK[b] - TIER_RANK[a]; })
+    .map(function (t) {
+      return { tier: t, count: counts[t], color: (TIER_META[t] || {}).color, glyph: TIER_GLYPH[t] };
+    });
+}
+
 // ── Response mappers ──────────────────────────────────────────────────────────
 
 function mapDashboard(data) {
@@ -99,7 +119,7 @@ function mapDashboard(data) {
     },
     tierScoredBy:   data.tier?.scored_by || 'keywords',
     congratsReceived: data.congrats_received ?? 0,
-    badges: data.badges,
+    badges: _mapBadges(data.badges),
     continueCourse: data.continue_course ? {
       name:     data.continue_course.name,
       cat:      'general',

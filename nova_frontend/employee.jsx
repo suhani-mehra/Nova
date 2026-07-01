@@ -115,10 +115,16 @@ function MyEmployee(){
       h('aside',{className:'badges'},
         h('div',{className:'badges-title'},'Badges Earned'),
         hasBadges
-          ? h('div',{className:'badge-rows'},
-              E.badges.map((g,gi)=>h('div',{className:'badge-row',key:gi},
-                Array.from({length:g.count}).map((_,i)=>
-                  h(Ribbon,{key:i, color:g.color, glyph:g.glyph})))))
+          ? h('div',{className:'badge-cols'},
+              E.badges.map((g,gi)=>{
+                const MAX_STACK=3;                       // ribbons visible per column
+                const shown=Math.min(g.count, MAX_STACK);
+                const extra=g.count-shown;
+                return h('div',{className:'badge-col',key:gi},
+                  Array.from({length:shown}).map((_,i)=>
+                    h(Ribbon,{key:i, color:g.color, glyph:g.glyph})),
+                  extra>0 ? h('div',{className:'badge-more'}, '+'+extra) : null);
+              }))
           : h('div',{className:'badge-empty'},
               h('div',{className:'badge-empty-icon'},'🎖'),
               h('div',{className:'badge-empty-title'},'No badges yet'),

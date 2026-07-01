@@ -542,7 +542,7 @@ def _compute_quarterly_ai_proficiency() -> list:
     global _trend_computing
     from nova_db.gpt_cache import get_cache, set_cache
     from nova_db.course_scores import get_scores_for_items
-    from services.skill_service import MASTERY_THRESHOLD
+    from services.skill_service import MASTERY_THRESHOLD, MASTERY_POWER
 
     CACHE_KEY = "ai_proficiency_trend"
     cached = get_cache(CACHE_KEY)
@@ -666,6 +666,15 @@ def _compute_quarterly_ai_proficiency() -> list:
     q_end_dates = [(1, 3, 31), (2, 6, 30), (3, 9, 30), (4, 12, 31)]
     q_idx = (today.month - 1) // 3
     yr = today.year
+    # The chart is "measured at each quarter end", so exclude the current
+    # in-progress quarter (it has partial data and would dip sharply). Shift the
+    # window back to end at the last COMPLETED quarter.
+    _, _cm, _cd = q_end_dates[q_idx]
+    if date(yr, _cm, _cd) > today:
+        q_idx -= 1
+        if q_idx < 0:
+            q_idx = 3
+            yr -= 1
     quarters: list = []
     for _ in range(7):  # 7 = 6 displayed + 1 warm-up
         _, m, d = q_end_dates[q_idx]
@@ -697,9 +706,9 @@ def _compute_quarterly_ai_proficiency() -> list:
     for label, cutoff in quarters[1:]:
         proficient = sum(
             1 for uid in all_uids
-            if min(100.0, math.sqrt(
+            if min(100.0, (
                 sum(v for d, v in user_ai[uid] if d <= cutoff) / MASTERY_THRESHOLD
-            ) * 100) >= 45.0
+            ) ** MASTERY_POWER * 100) >= settings.ai_proficiency_min_score
         )
         pct = round(proficient / total * 100, 1)
         active_pct = round(len(user_active_in_quarter[label]) / total * 100, 1)
@@ -743,10 +752,12 @@ def _compute_dept_snapshot() -> list:
     Cached 24 h under key "dept_snapshot". Runs at startup.
     """
     global _dept_snapshot_computing
-    from nova_db.gpt_cache import get_cache, set_cache
+    from nova_db.gpt_cache import get_cache, get_cache_stale, set_cache
     from core.queries import _DEDUP_CTE
 
     CACHE_KEY = "dept_snapshot"
+    BASELINE_KEY = "dept_ai_baseline"
+    BASELINE_WINDOW_DAYS = 30
     cached = get_cache(CACHE_KEY)
     if cached:
         _dept_snapshot_computing = False
@@ -811,29 +822,54 @@ def _compute_dept_snapshot() -> list:
 
     threshold = settings.ai_proficiency_min_score
 
-    # Load previous snapshot for trend (stored separately, kept 7 days)
-    prev_map: dict = {}
-    prev_snap = get_cache("dept_snapshot_prev")
-    if prev_snap:
-        for d in (prev_snap.get("result") or []):
-            prev_map[d["dept"]] = d["ai_proficient_pct"]
-
     result = []
     for dept, uids_in_dept in dept_uids.items():
         proficient = sum(1 for uid in uids_in_dept if uid_ai.get(uid, 0) >= threshold)
         pct = round(proficient / len(uids_in_dept) * 100, 1) if uids_in_dept else 0.0
-        prev_pct = prev_map.get(dept, pct)   # no history → trend 0
         result.append({
             "dept":              dept,
             "headcount":         len(uids_in_dept),
             "ai_proficient_pct": pct,
-            "trend_pct":         round(pct - prev_pct, 1),
+            "trend_pct":         0.0,   # filled from the period baseline below
         })
+
+    # Trend = change vs a period-stable baseline. The baseline only refreshes
+    # every BASELINE_WINDOW_DAYS (so the trend is an honest change-over-a-month,
+    # not a day-over-day delta) and is NEVER seeded from a degenerate run
+    # (nobody proficient — e.g. a cold cache), which previously produced a
+    # spurious "trend == pct".
+    total_proficient = sum(1 for uid in uid_ai if uid_ai.get(uid, 0) >= threshold)
+    today = date.today()
+    baseline = get_cache_stale(BASELINE_KEY)
+    baseline_pcts: dict = {}
+    baseline_fresh = False
+    if baseline:
+        res = baseline.get("result") or {}
+        baseline_pcts = res.get("pcts", {}) or {}
+        try:
+            captured = date.fromisoformat(res.get("captured_at", ""))
+            baseline_fresh = (today - captured).days < BASELINE_WINDOW_DAYS
+        except Exception:
+            baseline_fresh = False
+
+    # Only show a delta once a baseline exists; otherwise 0 (no spurious jump).
+    if baseline_pcts:
+        for d in result:
+            d["trend_pct"] = round(
+                d["ai_proficient_pct"] - baseline_pcts.get(d["dept"], d["ai_proficient_pct"]), 1)
 
     result.sort(key=lambda x: x["ai_proficient_pct"], reverse=True)
 
-    # Keep current as "prev" so the next recompute can show a delta
-    set_cache("dept_snapshot_prev", result, "computed", ttl_hours=24 * 7)
+    # (Re)seed the baseline only from a non-degenerate snapshot, and only when
+    # it's missing or older than the window.
+    if total_proficient > 0 and (not baseline_pcts or not baseline_fresh):
+        set_cache(
+            BASELINE_KEY,
+            {"pcts": {d["dept"]: d["ai_proficient_pct"] for d in result},
+             "captured_at": today.isoformat()},
+            "computed", ttl_hours=24 * 60,
+        )
+
     set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
 
     logger.info("dept_snapshot: complete — %d departments", len(result))

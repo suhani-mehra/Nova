@@ -100,7 +100,8 @@ class Settings(BaseSettings):
 
     # ── Streak & Scoring ─────────────────────────────────────────────────────
     streak_min_seconds_per_day: int = 1800   # 30 minutes
-    ai_proficiency_min_score: int = 60       # out of 100
+    ai_proficiency_min_score: int = 30       # out of 100
+    monthly_credit_target: float = 100.0     # month-to-date credits that map credits_score to 100
 
 
 @lru_cache(maxsize=1)

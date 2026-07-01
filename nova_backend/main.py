@@ -122,6 +122,22 @@ async def lifespan(app: FastAPI):
             from nova_db.gpt_cache import clear_by_prefix
 
             logger.info("Nightly cache refresh starting")
+
+            # Month rollover: on the 1st (with a day<=3 backfill for a missed run),
+            # award each employee the tier they ended the just-completed month with,
+            # BEFORE the refresh below resets the live tier to the new month.
+            try:
+                from services.tier_service import award_monthly_badges
+                from nova_db.badges import badges_exist_for
+                today = datetime.now(timezone.utc).date()
+                prior = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+                prior_str = prior.strftime("%Y-%m")
+                if today.day == 1 or (today.day <= 3 and not badges_exist_for(prior_str)):
+                    logger.info("Month rollover: awarding badges for %s", prior_str)
+                    award_monthly_badges(prior, awarded_at=today.isoformat())
+            except Exception as exc:
+                logger.warning("Nightly monthly badge award failed: %s", exc)
+
             try:
                 refresh_tier_scores_cache(force=True)
             except Exception as exc:

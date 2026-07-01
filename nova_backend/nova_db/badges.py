@@ -68,3 +68,13 @@ def award_badge(user_id: int, tier: str, month: str, awarded_at: str) -> None:
             (user_id, tier, awarded_at, month),
         )
         c.commit()
+
+
+def badges_exist_for(month: str) -> bool:
+    """True if any badge has been awarded for the given 'YYYY-MM' month.
+    Used by the nightly job to gate/backfill the monthly award."""
+    with _conn() as c:
+        row = c.execute(
+            "SELECT 1 FROM user_badges WHERE month = ? LIMIT 1", (month,)
+        ).fetchone()
+    return row is not None
