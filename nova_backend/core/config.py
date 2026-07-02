@@ -103,6 +103,26 @@ class Settings(BaseSettings):
     ai_proficiency_min_score: int = 30       # out of 100
     monthly_credit_target: float = 100.0     # month-to-date credits that map credits_score to 100
 
+    # ── AI proficiency levels (Overview "by region" bar chart) ───────────────
+    # Cumulative ("at least") thresholds on the normalised 0–100 AI axis score.
+    # "professional" == ai_proficiency_min_score (the same definition used for the
+    # company-wide AI-proficient metric everywhere else). Someone at a higher
+    # level is also counted in every lower level. Edit here to retune.
+    ai_proficiency_levels: dict = {
+        "professional": 30,
+        "specialist":   45,
+        "expert":       55,
+        "champion":     65,
+    }
+    # Per-level coverage goal = % of the workforce the company wants at each level.
+    # Rendered as the dashed goal line above each bar. Edit here to retune.
+    ai_proficiency_level_goals: dict = {
+        "professional": 80,
+        "specialist":   50,
+        "expert":       35,
+        "champion":     20,
+    }
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

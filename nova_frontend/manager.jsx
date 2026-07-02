@@ -8,6 +8,27 @@ const trendIco = d => d==='up'?Icons.up({size:14,sw:2.4}):d==='down'?Icons.down(
 function MgrOverview(){
   const M=NOVA.manager;
   const kpiIc = {spark:Icons.spark, users:Icons.users, shield:Icons.shield, alert:Icons.alert};
+  const [chartTab,setChartTab]=useStateM('trend');   // 'trend' (line) | 'region' (bars)
+  const region=M.proficiencyByRegion;
+
+  const trendView = [
+    h(LineChart,{key:'lc', months:M.months, proficiency:M.series.proficiency, active:M.series.active, target:M.target, total:M.total}),
+    h('div',{key:'lg',className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
+      h('div',{className:'it'}, h('span',{className:'sw',style:{background:'linear-gradient(90deg,#2ACCFF,#A634FF,#FF4398)'}}),'% AI-proficient employees'),
+      h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#2ACCFF'}}),'% active learners'),
+      h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#FF4398'}}),`Target ${M.target}%`)),
+  ];
+
+  const regionView = [
+    h(RegionProficiencyChart,{key:'rc', data:region}),
+    region && region.regions && h('div',{key:'rg',className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
+      region.regions.map(r=>h('div',{className:'it',key:r.key},
+        h('span',{style:{width:13,height:13,borderRadius:3,background:r.color,display:'inline-block'}}),
+        `${r.label} · ${r.total.toLocaleString()}`)),
+      h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#3a3d57'}}),'Goal per level'),
+      h('div',{className:'it'}, h('span',{className:'sw',style:{background:'#a7abc0'}}),'Total workforce (100%)')),
+  ];
+
   return h('div',{className:'page'},
     h('div',{className:'page-head'},
       h('h1',{className:'greeting'},'Learning Overview'),
@@ -23,15 +44,14 @@ function MgrOverview(){
     h('div',{className:'card', style:{marginBottom:22}},
       h('div',{className:'card-head-row', style:{marginBottom:16}},
         h('div',null,
-          h('div',{className:'card-title'},'AI Proficiency Trend'),
-          h('div',{className:'card-sub'},'% of all employees with AI proficiency ≥ 30%, measured at each quarter end.')),
-        h('div',{className:'goal-banner'}, Icons.target({size:16,color:'#A634FF'}),
-          h('span',null,'Goal: ', h('b',null,'every employee AI-proficient')))),
-      h(LineChart,{months:M.months, proficiency:M.series.proficiency, active:M.series.active, target:M.target, total:M.total}),
-      h('div',{className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
-        h('div',{className:'it'}, h('span',{className:'sw',style:{background:'linear-gradient(90deg,#2ACCFF,#A634FF,#FF4398)'}}),'% AI-proficient employees'),
-        h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#2ACCFF'}}),'% active learners'),
-        h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#FF4398'}}),`Target ${M.target}%`))
+          h('div',{className:'card-title'}, chartTab==='trend'?'AI Proficiency Trend':'AI Proficiency by Region'),
+          h('div',{className:'card-sub'}, chartTab==='trend'
+            ? '% of all employees with AI proficiency ≥ 30%, measured at each quarter end.'
+            : 'Share of the company reaching each proficiency level today, split by region, versus the goal.')),
+        h('div',{className:'seg'},
+          h('button',{className:chartTab==='trend'?'on':'', onClick:()=>setChartTab('trend')},'Trend'),
+          h('button',{className:chartTab==='region'?'on':'', onClick:()=>setChartTab('region')},'By region'))),
+      chartTab==='trend' ? trendView : regionView
     )
   );
 }

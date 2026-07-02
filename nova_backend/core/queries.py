@@ -95,6 +95,22 @@ def get_employee_profile(conn: pyodbc.Connection, user_id: int) -> list[dict]:
     return rows
 
 
+def get_all_active_employee_regions(conn: pyodbc.Connection) -> list[dict]:
+    """
+    All active employees with their raw country_code, for the company-wide
+    "AI proficiency by region" chart. Uses the dedup CTE so SCD fan-out is
+    avoided. country_code is returned raw (may be NULL) — mapping to a region
+    is done in Python via core.geo.continent_for().
+    """
+    sql = _DEDUP_CTE + """
+        SELECT user_id, country_code
+        FROM   latest_profiles
+        WHERE  rn      = 1
+          AND  user_id IS NOT NULL
+    """
+    return query(sql)
+
+
 def is_manager(conn: pyodbc.Connection, user_id: int) -> bool:
     """Return True if user_id appears as manager for at least one active employee."""
     sql = _DEDUP_CTE + """

@@ -107,4 +107,102 @@ function LineChart({months, proficiency, active, target, total}){
   );
 }
 
-Object.assign(window,{TierTrack, RadarChart, LineChart});
+/* ---------- Manager region proficiency bar chart ---------- */
+/* Stacked bar per AI-proficiency level (Professional→Champion). Bar height =
+   % of company at that level (cumulative "at least" threshold), stacked by
+   region. Dashed line above each bar = the coverage goal for that level.
+   Hover a region segment → what share of that region's own employees are at
+   the level. All numbers come straight from the backend payload. */
+function RegionProficiencyChart({data}){
+  const [hover,setHover]=_useState(null);   // {li, rkey}
+  if(!data || !data.levels || !data.levels.length){
+    return h('div',{style:{padding:'48px 0',textAlign:'center',color:'var(--muted)',
+      fontSize:14,fontWeight:600}}, 'Computing region breakdown…');
+  }
+  const {levels, regions, total} = data;
+  const fmt = n => Math.round(n).toLocaleString();
+
+  const W=820, H=360, padL=44, padR=20, padT=30, padB=64;
+  const plotH=H-padT-padB;
+  const colW=(W-padL-padR)/levels.length;
+  const barW=Math.min(96, colW*0.5);
+  const cx = i => padL + colW*i + colW/2;
+  const iy = v => padT + (100-v)/100*plotH;   // v in 0..100 (% of company)
+  const yticks=[0,25,50,75,100];
+
+  const regionByKey = Object.fromEntries(regions.map(r=>[r.key,r]));
+
+  return h('div',{style:{position:'relative'}},
+    h('svg',{viewBox:`0 0 ${W} ${H}`, width:'100%', onMouseLeave:()=>setHover(null)},
+      // y grid + labels (top line = total workforce, 100%)
+      yticks.map(t=>h('g',{key:'y'+t},
+        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t),
+          stroke: t===100?'#a7abc0':'#eeedf5', strokeWidth: t===100?1.6:1}),
+        h('text',{x:padL-10,y:iy(t)+4,textAnchor:'end',fontSize:11.5,fontWeight:600,fill:'#9a9db4'}, t+'%')
+      )),
+      // per-level columns
+      levels.map((lv,li)=>{
+        const x0 = cx(li)-barW/2;
+        // stacked region segments, bottom-anchored
+        let cum=0;   // accumulated % of company from below
+        const segs = regions.map(r=>{
+          const seg=lv.regions[r.key]||{};
+          const segPct=seg.pct_of_company||0;
+          if(segPct<=0){return null;}
+          const yTop=iy(cum+segPct);
+          const yBot=iy(cum);
+          const isActive=hover && hover.li===li && hover.rkey===r.key;
+          const rect=h('rect',{key:'s'+r.key,
+            x:x0, y:yTop, width:barW, height:Math.max(0,yBot-yTop),
+            fill:r.color, opacity:isActive?1:0.86,
+            stroke:isActive?'#fff':'rgba(255,255,255,.22)', strokeWidth:isActive?2:1,
+            style:{cursor:'pointer',transition:'opacity .15s'},
+            onMouseEnter:()=>setHover({li,rkey:r.key})});
+          cum+=segPct;
+          return rect;
+        }).filter(Boolean);
+
+        // value label above bar (total % of company at this level)
+        const topY=iy(lv.totalPct);
+        const label=h('text',{key:'vl',x:cx(li),y:topY-9,textAnchor:'middle',
+          fontSize:13,fontWeight:800,fill:'#181a2e'},
+          lv.totalPct+'%',
+          h('tspan',{fill:'#7a7d96',fontWeight:600,fontSize:11}, ' · '+fmt(lv.totalCount)));
+
+        // goal dashed line + chip
+        const gy=iy(lv.goalPct);
+        const gw=barW+40;
+        const goal=h('g',{key:'g'},
+          h('line',{x1:cx(li)-gw/2,y1:gy,x2:cx(li)+gw/2,y2:gy,
+            stroke:'#3a3d57',strokeWidth:1.8,strokeDasharray:'5 4',opacity:.8}),
+          h('text',{x:cx(li)+gw/2,y:gy-5,textAnchor:'end',fontSize:10.5,fontWeight:800,
+            fill:'#3a3d57'}, 'Goal '+lv.goalPct+'%'));
+
+        // x-axis level name + sub
+        const xlab=h('g',{key:'xl'},
+          h('text',{x:cx(li),y:H-padB+22,textAnchor:'middle',fontSize:13.5,fontWeight:800,
+            fill:'#181a2e'}, lv.name),
+          h('text',{x:cx(li),y:H-padB+39,textAnchor:'middle',fontSize:11,fontWeight:600,
+            fill:'#9a9db4'}, lv.totalPct+'% of '+lv.goalPct+'% goal'));
+
+        return h('g',{key:'col'+li}, segs, label, goal, xlab);
+      })
+    ),
+    hover && (()=>{
+      const lv=levels[hover.li];
+      const r=regionByKey[hover.rkey];
+      const seg=lv.regions[hover.rkey]||{};
+      // tooltip anchored at the top of that column
+      const lx=(cx(hover.li)/W)*100;
+      const ty=(iy(lv.totalPct)/H)*100;
+      return h('div',{className:'chart-tip',style:{left:lx+'%',top:ty+'%'}},
+        h('div',{className:'t1'}, (r?r.label:hover.rkey)+' · '+lv.name),
+        h('div',{className:'row'}, h('span',{className:'dot',style:{background:r?r.color:'#999'}}),
+          (seg.pct_of_region||0)+'% of '+(r?r.label:'')+' at '+lv.name),
+        h('div',{style:{fontSize:12,color:'#b7b9cc',fontWeight:600,marginTop:4}},
+          fmt(seg.count||0)+' of '+fmt(r?r.total:0)+' '+(r?r.label:'')+' employees'));
+    })()
+  );
+}
+
+Object.assign(window,{TierTrack, RadarChart, LineChart, RegionProficiencyChart});

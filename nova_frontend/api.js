@@ -178,6 +178,47 @@ function mapTeam(data) {
   };
 }
 
+// Region colors for the "AI proficiency by region" bar chart. Reuses the app's
+// existing palette (matches the line-chart legend gradient stops).
+const REGION_COLORS = {
+  asia:  '#FF4398',
+  na:    '#2ACCFF',
+  eu:    '#A634FF',
+  other: '#9aa2b1',
+};
+const REGION_KEYS = ['asia', 'na', 'eu', 'other'];
+
+// Shapes the backend's proficiency_by_region payload into a chart-ready object.
+// Returns null when the payload is missing or has no employees (background job
+// still warming) so the UI can show a graceful "computing" state.
+function mapProficiencyByRegion(pbr) {
+  if (!pbr || !pbr.levels || !pbr.total) return null;
+  const labels = pbr.region_labels || {};
+  // Only include regions that actually have employees, in the canonical order.
+  const regions = REGION_KEYS
+    .filter(k => (pbr.region_totals && pbr.region_totals[k]) > 0)
+    .map(k => ({
+      key:   k,
+      label: labels[k] || k,
+      color: REGION_COLORS[k] || '#9aa2b1',
+      total: pbr.region_totals[k],
+    }));
+  return {
+    total:   pbr.total,
+    regions,
+    regionTotals: pbr.region_totals || {},
+    levels: pbr.levels.map(lv => ({
+      key:        lv.key,
+      name:       lv.name,
+      threshold:  lv.threshold,
+      goalPct:    lv.goal_pct,
+      totalPct:   lv.total_pct,
+      totalCount: lv.total_count,
+      regions:    lv.regions || {},   // {asia:{count,pct_of_company,pct_of_region,label}, ...}
+    })),
+  };
+}
+
 function mapManager(data, teamsData, peopleData) {
   const cols = ['#A634FF','#2ACCFF','#5400DC','#FF4398','#F588FF','#e08531','#C21178','#FF6B88'];
 
@@ -240,6 +281,7 @@ function mapManager(data, teamsData, peopleData) {
       proficiency: data.monthly_trend.map(m => m.credits),
       active:      data.monthly_trend.map(m => m.active_pct ?? 0),
     },
+    proficiencyByRegion: mapProficiencyByRegion(data.proficiency_by_region),
     distribution: [],
     teams: teamsData.departments.map((d, i) => {
       const pct      = d.ai_proficient_pct;

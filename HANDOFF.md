@@ -15,8 +15,9 @@ It has two audiences, served from one app:
   (with the ability to send "congrats").
 - **Manager view ("Overview" / "Teams" / "People")** — company KPIs (headcount, active
   learners, % AI-proficient, retention, at-risk count), an AI-proficiency trend chart by
-  quarter, per-department proficiency, and a searchable people list with each person's tier
-  and proficiency.
+  quarter (with a second "by region" tab breaking down four proficiency levels by
+  Asia/North America/Europe/Other), per-department proficiency, and a searchable people list
+  with each person's tier and proficiency.
 
 The core idea: an LLM grades every course on 5 skill verticals; each employee's completed
 courses roll up into skill scores and a composite **tier**; tiers reset monthly and mint a

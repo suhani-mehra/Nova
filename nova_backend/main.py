@@ -94,6 +94,11 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Could not schedule dept snapshot job: %s", exc)
         try:
+            from routers.manager import _compute_ai_proficiency_by_region
+            loop.run_in_executor(None, _compute_ai_proficiency_by_region)
+        except Exception as exc:
+            logger.warning("Could not schedule AI proficiency-by-region job: %s", exc)
+        try:
             # Pre-warm the expensive company-wide overview stats so the manager
             # overview page never blocks on a full company scan after a restart.
             from routers.manager import (
@@ -165,12 +170,14 @@ async def lifespan(app: FastAPI):
                     _compute_company_at_risk_count,
                     _compute_quarterly_ai_proficiency,
                     _compute_dept_snapshot,
+                    _compute_ai_proficiency_by_region,
                 )
                 _compute_company_overview_stats()
                 _compute_company_retention()
                 _compute_company_at_risk_count()
                 _compute_quarterly_ai_proficiency()
                 _compute_dept_snapshot()
+                _compute_ai_proficiency_by_region()
             except Exception as exc:
                 logger.warning("Nightly company stats refresh failed: %s", exc)
 

@@ -877,6 +877,171 @@ def _compute_dept_snapshot() -> list:
     return result
 
 
+_region_snapshot_computing = False  # guard against concurrent region snapshot recomputes
+
+
+def _compute_ai_proficiency_by_region() -> dict:
+    """
+    Computes, for each AI proficiency level (Professional/Specialist/Expert/
+    Champion), what % of the whole company has reached that level — broken down
+    by region (Asia / North America / Europe / Other).
+
+    Levels are CUMULATIVE ("at least"): a Champion (score >= 65) is also counted
+    at Expert, Specialist and Professional. "Professional" == the standard
+    company-wide AI-proficient threshold (ai_proficiency_min_score).
+
+    Returns:
+        {
+          "total": <company headcount>,
+          "region_totals": {"asia": n, "na": n, "eu": n, "other": n},
+          "levels": [
+            {"key","name","threshold","goal_pct","total_count","total_pct",
+             "regions": {"asia":{"count","pct_of_company","pct_of_region"}, ...}},
+            ...
+          ],
+        }
+    Cached 25 h under key "ai_proficiency_by_region". Runs at startup/nightly.
+    """
+    global _region_snapshot_computing
+    from nova_db.gpt_cache import get_cache, set_cache
+    from core.queries import get_all_active_employee_regions
+    from core.geo import continent_for, REGION_ORDER, REGION_LABELS
+
+    CACHE_KEY = "ai_proficiency_by_region"
+    cached = get_cache(CACHE_KEY)
+    if cached:
+        _region_snapshot_computing = False
+        return cached["result"]
+
+    _region_snapshot_computing = True
+    logger.info("ai_proficiency_by_region: computing company-wide region split")
+
+    try:
+        emp_rows = get_all_active_employee_regions(None)
+    except Exception as exc:
+        logger.warning("ai_proficiency_by_region: employee query failed: %s", exc)
+        _region_snapshot_computing = False
+        return _default_region_snapshot()
+
+    if not emp_rows:
+        _region_snapshot_computing = False
+        return _default_region_snapshot()
+
+    uid_region: dict = {}
+    all_uid_list: list = []
+    for r in emp_rows:
+        uid = r["user_id"]
+        uid_region[uid] = continent_for(r.get("country_code"))
+        all_uid_list.append(uid)
+
+    # Read AI scores from gpt_cache first, then batch-compute the uncached —
+    # identical warm-cache path to _compute_dept_snapshot so scoring logic is
+    # never duplicated.
+    uid_ai: dict = {}
+    uncached_uids: list = []
+    for uid in all_uid_list:
+        c = get_cache(f"classify_{uid}")
+        if c:
+            res = c.get("result", {})
+            axes = res.get("axes", ["AI", "Cloud", "Frontend", "Backend", "Data"])
+            this_month = res.get("this_month", [])
+            try:
+                ai_idx = axes.index("AI")
+                uid_ai[uid] = float(this_month[ai_idx]) if ai_idx < len(this_month) else 0.0
+            except (ValueError, IndexError):
+                uid_ai[uid] = 0.0
+        else:
+            uncached_uids.append(uid)
+
+    if uncached_uids:
+        try:
+            from services.skill_service import get_team_skill_scores
+            BATCH = 500
+            for i in range(0, len(uncached_uids), BATCH):
+                batch = uncached_uids[i: i + BATCH]
+                team_norm = get_team_skill_scores(batch)
+                for uid in batch:
+                    uid_ai[uid] = round(team_norm.get(uid, {}).get("AI", 0.0), 1)
+        except Exception as exc:
+            logger.warning("ai_proficiency_by_region: skill scores failed for uncached batch: %s", exc)
+            for uid in uncached_uids:
+                uid_ai.setdefault(uid, 0.0)
+
+    total = len(all_uid_list)
+    region_totals = {reg: 0 for reg in REGION_ORDER}
+    for uid in all_uid_list:
+        region_totals[uid_region[uid]] += 1
+
+    levels_cfg = settings.ai_proficiency_levels
+    goals_cfg = settings.ai_proficiency_level_goals
+
+    levels = []
+    for key in ("professional", "specialist", "expert", "champion"):
+        threshold = levels_cfg[key]
+        per_region = {reg: 0 for reg in REGION_ORDER}
+        for uid in all_uid_list:
+            if uid_ai.get(uid, 0.0) >= threshold:
+                per_region[uid_region[uid]] += 1
+        total_count = sum(per_region.values())
+        regions_out = {}
+        for reg in REGION_ORDER:
+            cnt = per_region[reg]
+            reg_total = region_totals[reg]
+            regions_out[reg] = {
+                "label":          REGION_LABELS[reg],
+                "count":          cnt,
+                "pct_of_company": round(cnt / total * 100, 1) if total else 0.0,
+                "pct_of_region":  round(cnt / reg_total * 100, 1) if reg_total else 0.0,
+            }
+        levels.append({
+            "key":         key,
+            "name":        key.capitalize(),
+            "threshold":   threshold,
+            "goal_pct":    goals_cfg[key],
+            "total_count": total_count,
+            "total_pct":   round(total_count / total * 100, 1) if total else 0.0,
+            "regions":     regions_out,
+        })
+
+    result = {
+        "total":         total,
+        "region_totals": {reg: region_totals[reg] for reg in REGION_ORDER},
+        "region_labels": {reg: REGION_LABELS[reg] for reg in REGION_ORDER},
+        "levels":        levels,
+    }
+
+    set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
+    logger.info(
+        "ai_proficiency_by_region: complete — %d employees, professional %.1f%%",
+        total, levels[0]["total_pct"] if levels else 0.0,
+    )
+    _region_snapshot_computing = False
+    return result
+
+
+def _default_region_snapshot() -> dict:
+    """Empty placeholder shown while the background job computes."""
+    from core.geo import REGION_ORDER, REGION_LABELS
+    from core.config import settings as _s
+    return {
+        "total": 0,
+        "region_totals": {reg: 0 for reg in REGION_ORDER},
+        "region_labels": {reg: REGION_LABELS[reg] for reg in REGION_ORDER},
+        "levels": [
+            {
+                "key": key, "name": key.capitalize(),
+                "threshold": _s.ai_proficiency_levels[key],
+                "goal_pct": _s.ai_proficiency_level_goals[key],
+                "total_count": 0, "total_pct": 0.0,
+                "regions": {reg: {"label": REGION_LABELS[reg], "count": 0,
+                                   "pct_of_company": 0.0, "pct_of_region": 0.0}
+                            for reg in REGION_ORDER},
+            }
+            for key in ("professional", "specialist", "expert", "champion")
+        ],
+    }
+
+
 # ── Legacy direct-report helper ───────────────────────────────────────────────
 
 def _avg_credits_this_quarter(uids: list) -> float:
@@ -1123,6 +1288,15 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
         at_risk_trend_pct  = at_risk_count.get("trend_pct", 0.0)
         at_risk_trend_dir  = at_risk_count.get("trend_dir", "flat")
 
+        # AI proficiency by region (bar-chart tab). Stale-while-revalidate so the
+        # request never blocks on a full company scan; empty placeholder until
+        # the background compute finishes.
+        proficiency_by_region = _swr(
+            "ai_proficiency_by_region",
+            _compute_ai_proficiency_by_region,
+            _default_region_snapshot(),
+        )
+
     except Exception as exc:
         logger.warning("Fabric unavailable for manager overview uid=%s: %s", mgr_id, exc)
         raise HTTPException(status_code=503, detail="Data unavailable")
@@ -1145,6 +1319,7 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
             "at_risk_count_trend_dir":  at_risk_trend_dir,
         },
         "monthly_trend": monthly_trend,
+        "proficiency_by_region": proficiency_by_region,
         "at_risk":        at_risk,
     }
 
