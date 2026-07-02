@@ -52,8 +52,12 @@ def get_cache_stale(key: str) -> dict | None:
 
 def set_cache(key: str, result: dict,
               scored_by: str, ttl_hours: int = 24):
-    expires = (datetime.utcnow() +
-               timedelta(hours=ttl_hours)).isoformat()
+    # Always expire at 4 AM UTC the following day, regardless of ttl_hours.
+    # Using "tomorrow at 4 AM" ensures entries written by the 3 AM nightly
+    # refresh get a full ~25h TTL rather than expiring 55 min later.
+    now = datetime.utcnow()
+    expires = (now + timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
+    expires = expires.isoformat(sep=" ")
     with _conn() as c:
         c.execute(
             "INSERT OR REPLACE INTO gpt_cache "
