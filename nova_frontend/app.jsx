@@ -62,15 +62,19 @@ const TABS = {
     {id:'employee', label:'My Learning'},
   ],
   manager: [
-    {id:'overview', label:'Overview'},
-    {id:'teams',    label:'Teams'},
-    {id:'people',   label:'People'},
+    {id:'overview',  label:'Overview'},
+    {id:'yourteam',  label:'Your Team'},
   ],
 };
 
-function getTabsForRole(role) {
-  if (role === 'both' || role === 'manager') return [...TABS.employee, ...TABS.manager];
-  return TABS.employee;
+// Overview is exec-manager only; everyone else sees just "Your Team".
+function managerTabList() {
+  const isExec = !!(window.NOVA && window.NOVA.accounts && window.NOVA.accounts.isExecManager);
+  return TABS.manager.filter(t => t.id !== 'overview' || isExec);
+}
+
+function tabsForAccount(account) {
+  return account === 'manager' ? managerTabList() : (TABS[account] || TABS.employee);
 }
 
 const EXEC_DEV_IDS = new Set([16467, 16465, 16470]);
@@ -162,9 +166,9 @@ function TopKPI({account}){
       h('div',{className:'streak-topbar-lab'},'day streak')
     );
   }
-  return h('div',{className:'kpi-pill'},
-    h('div',{className:'ic',style:{background:'rgba(42,204,255,.12)',color:'#0f8fc4'}}, Icons.users({size:19})),
-    h('div',null, h('div',{className:'lab'},'Active Learners This Week'), h('div',{className:'val'},(window.NOVA?.manager?.kpis?.[1]?.num)||'—')));
+  // Manager topbar carries no KPI pill — Active learners moved into the
+  // Overview page hero card.
+  return null;
 }
 
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
@@ -175,9 +179,8 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 
 function App(){
   const initKind = (NOVA.accounts.current && NOVA.accounts.current.kind) || 'employee';
-  const initRole = NOVA.accounts.role || initKind;
   const [account,setAccount]=useState(initKind);
-  const [tab,setTab]=useState(getTabsForRole(initRole)[0].id);
+  const [tab,setTab]=useState(tabsForAccount(initKind)[0].id);
   const [t,setTweak]=useTweaks(TWEAK_DEFAULTS);
   const [,forceUpdate]=useState(0);
 
@@ -203,17 +206,16 @@ function App(){
   const switchAccount=(role)=>{
     if(NOVA.accounts[role]) NOVA.accounts.current = NOVA.accounts[role];
     setAccount(role);
-    setTab((TABS[role]||TABS.employee)[0].id);
+    setTab(tabsForAccount(role)[0].id);
   };
 
   const render=()=>{
     if (tab === 'employee') return h(MyEmployee);
     if (tab === 'overview') return h(MgrOverview);
-    if (tab === 'teams') return h(MgrTeams);
-    return h(MgrPeople);
+    return h(MgrYourTeam);
   };
 
-  const tabs = TABS[account] || TABS.employee;
+  const tabs = tabsForAccount(account);
 
   return h(React.Fragment,null,
     h('header',{className:'topbar'},

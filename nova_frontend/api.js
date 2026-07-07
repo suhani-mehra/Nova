@@ -219,96 +219,73 @@ function mapProficiencyByRegion(pbr) {
   };
 }
 
-function mapManager(data, teamsData, peopleData) {
-  const cols = ['#A634FF','#2ACCFF','#5400DC','#FF4398','#F588FF','#e08531','#C21178','#FF6B88'];
+// Maps a direct-reports employee row (from /api/manager/your-team or
+// /api/manager/people/search) into the shape the people table expects.
+function _mapPersonRow(e) {
+  return {
+    user_id:     e.user_id,
+    name:        e.name,
+    role:        e.designation || e.department,
+    team:        e.department,
+    department:  e.department,
+    designation: e.designation || '',
+    tier:        e.tier,
+    prof:        Math.round(e.ai_proficiency),
+    streak:      e.streak_days || 0,
+    status:      Math.round(e.ai_proficiency) < 20 ? 'risk' : 'ok',
+    av:          _nameToGrad(e.name),
+    scoredBy:    e.scored_by || 'keywords',
+  };
+}
 
-  const aiTrendPts      = data.kpis.ai_proficiency_trend_pts ?? 0;
-  const activeTrendPct  = data.kpis.active_week_trend_pct    ?? 0;
-  const retRate         = data.kpis.retention_rate           ?? 0;
-  const retTrendPct     = data.kpis.retention_rate_trend_pct ?? 0;
-  const retTrendDir     = data.kpis.retention_rate_trend_dir ?? 'flat';
-  const atRiskCount     = data.kpis.at_risk_count_company    ?? data.at_risk.length;
-  const atRiskTrendPct  = data.kpis.at_risk_count_trend_pct  ?? 0;
-  const atRiskTrendDir  = data.kpis.at_risk_count_trend_dir  ?? 'flat';
-
+// Company-wide Overview (exec managers only). data = /api/manager/overview.
+function mapOverview(data) {
+  const total          = data.kpis.total_team;
+  const activeWeek     = data.kpis.active_this_week ?? 0;
+  const activeTrendPct = data.kpis.active_week_trend_pct ?? 0;
+  const activePct      = total ? (activeWeek / total * 100) : 0;
   const _sign = n => n >= 0 ? '+' : '';
 
   return {
-    total:  data.kpis.total_team,
-    goal:   'Every employee AI-proficient',
+    total,
     target: 80,
-    kpis: [
-      {
-        key: 'prof',
-        num: data.kpis.ai_proficient_pct.toFixed(0) + '%',
-        lab: `AI-proficient — <b>${data.kpis.ai_proficient_count} of ${data.kpis.total_team}</b>`,
-        trend: _sign(aiTrendPts) + aiTrendPts.toFixed(1) + ' pts',
-        dir:   aiTrendPts > 0 ? 'up' : aiTrendPts < 0 ? 'down' : 'flat',
-        ic: 'spark',
-        tint: 'rgba(166,52,255,.12)', col: '#A634FF',
-      },
-      {
-        key: 'active',
-        num: data.kpis.active_this_week.toLocaleString(),
-        lab: 'Active learners <b>this week</b>',
-        trend: _sign(activeTrendPct) + activeTrendPct.toFixed(0) + '%',
-        dir:   activeTrendPct > 0 ? 'up' : activeTrendPct < 0 ? 'down' : 'flat',
-        ic: 'users',
-        tint: 'rgba(42,204,255,.14)', col: '#0f8fc4',
-      },
-      {
-        key: 'ret',
-        num: retRate.toFixed(0) + '%',
-        lab: 'Active learners <b>last 30 days</b>',
-        trend: _sign(retTrendPct) + retTrendPct.toFixed(0) + ' pts',
-        dir:   retTrendDir,
-        ic: 'shield',
-        tint: 'rgba(31,169,113,.14)', col: '#1FA971',
-      },
-      {
-        key: 'risk',
-        num: atRiskCount.toString(),
-        lab: 'Employees <b>at risk</b>',
-        trend: _sign(atRiskTrendPct) + Math.abs(Math.round(atRiskTrendPct)) + '%',
-        dir:   atRiskTrendDir,
-        badWhenUp: true,   // at-risk going up is bad → invert the trend chip color
-        ic: 'alert',
-        tint: 'rgba(226,61,110,.12)', col: '#E23D6E',
-      },
-    ],
     months: data.monthly_trend.map(m => m.month),
     series: {
       proficiency: data.monthly_trend.map(m => m.credits),
       active:      data.monthly_trend.map(m => m.active_pct ?? 0),
     },
     proficiencyByRegion: mapProficiencyByRegion(data.proficiency_by_region),
-    distribution: [],
-    teams: teamsData.departments.map((d, i) => {
-      const pct      = d.ai_proficient_pct;
-      const trendPct = d.trend_pct ?? 0;
-      return {
-        name:    d.name,
-        members: d.headcount,
-        prof:    Math.round(pct),
-        trend:   _sign(trendPct) + Math.round(trendPct) + '%',
-        dir:     trendPct > 0 ? 'up' : trendPct < 0 ? 'down' : 'flat',
-        status:  pct >= 70 ? 'ok' : pct >= 50 ? 'warn' : 'risk',
-        col:     cols[i % cols.length],
-      };
-    }),
-    people: peopleData.employees.map(e => ({
-      user_id:     e.user_id,
-      name:        e.name,
-      role:        e.department,
-      team:        e.department,
-      department:  e.department,
-      designation: e.designation || '',
-      tier:        e.tier,
-      prof:        Math.round(e.ai_proficiency),
-      status:      Math.round(e.ai_proficiency) < 20 ? 'risk' : 'ok',
-      av:          _nameToGrad(e.name),
-      scoredBy:    e.scored_by || 'keywords',
+    // Active-learners-this-week hero card (the only surviving KPI).
+    activeLearners: {
+      count:    activeWeek,
+      pct:      activePct,
+      total,
+      trendPct: activeTrendPct,
+      trendStr: _sign(activeTrendPct) + Math.round(activeTrendPct) + '% vs last week',
+    },
+    // Real per-department proficiency (name + %), sorted best-first by backend.
+    teamLeaderboard: (data.team_leaderboard || []).map(t => ({
+      name: t.name,
+      prof: Math.round(t.prof),
     })),
+  };
+}
+
+// Direct-reports team view (all managers). data = /api/manager/your-team.
+function mapYourTeam(data) {
+  const people = (data.employees || []).map(_mapPersonRow);
+  const b = data.badges || {};
+  return {
+    size:   people.length,
+    radar:  data.radar || {axes:['AI','Cloud','Frontend','Backend','Data'], this_month:[0,0,0,0,0], last_month:[0,0,0,0,0]},
+    badges: {
+      total:          b.total || 0,
+      avgPerPerson:   b.avg_per_person || 0,
+      thisMonthCount: b.this_month_count || 0,
+      byTier:         b.by_tier || {platinum:0,diamond:0,gold:0,silver:0,bronze:0},
+    },
+    people,
+    riskCount: people.filter(p => p.status === 'risk').length,
   };
 }
 
@@ -327,6 +304,7 @@ function mapMe(data) {
     team:  data.department_code || 'Nova',
     av:    avByRole[data.role] || avByRole.employee,
     kind:  data.role,  // passes through "employee" | "manager" | "both"
+    isExecManager: !!data.is_exec_manager,
   };
 }
 
@@ -334,6 +312,29 @@ function mapMe(data) {
 
 let _resolveDataReady;
 window.__novaDataReady = new Promise(function(resolve) { _resolveDataReady = resolve; });
+
+// Loads manager-area data into NOVA.manager. "Your Team" is fetched for every
+// manager; the company-wide Overview is fetched only for exec managers (avoids a
+// needless 403). Static placeholder sections (verticals, specialization) come
+// from data.js — see NOVA.managerStatic.
+async function loadManagerData(isExec) {
+  const fetches = [apiGet('/api/manager/your-team?filter=all')];
+  if (isExec) fetches.push(apiGet('/api/manager/overview'));
+  const [teamData, overviewData] = await Promise.all(fetches);
+
+  const M = { isExec: !!isExec, team: null, overview: null };
+  if (teamData) {
+    try { M.team = mapYourTeam(teamData); }
+    catch (e) { console.warn('[Nova] mapYourTeam failed:', e); }
+  }
+  if (isExec && overviewData) {
+    try { M.overview = mapOverview(overviewData); }
+    catch (e) { console.warn('[Nova] mapOverview failed:', e); }
+  }
+  // Static placeholder sections (no real data source yet) — see data.js.
+  M.static = window.NOVA.managerStatic || {};
+  window.NOVA.manager = M;
+}
 
 async function initNova() {
   try {
@@ -376,6 +377,8 @@ async function initNova() {
 
     // Store the role globally so app.jsx can use it for tab rendering
     window.NOVA.accounts.role = role;
+    // Exec managers (company-wide Overview tab) — everyone else sees Your Team only.
+    window.NOVA.accounts.isExecManager = !!meData.is_exec_manager;
 
     if (role === 'employee') {
       window.NOVA.accounts.manager = null;
@@ -391,29 +394,15 @@ async function initNova() {
 
     } else if (role === 'manager') {
       window.NOVA.accounts.employee = null;
-      const [overviewData, teamsData, peopleData] = await Promise.all([
-        apiGet('/api/manager/overview'),
-        apiGet('/api/manager/teams'),
-        apiGet('/api/manager/people?filter=all'),
-      ]);
-      if (overviewData && teamsData && peopleData) {
-        window.NOVA.manager = mapManager(overviewData, teamsData, peopleData);
-      }
-
+      await loadManagerData(meData.is_exec_manager);
       console.log('[Nova] Real data loaded for role:', role);
       _resolveDataReady();
 
     } else if (role === 'both') {
-      // Load all data concurrently — thread-local connections handle parallelism safely.
-      const [dashData, teamData, overviewData, teamsData, peopleData] = await Promise.all([
+      const [dashData, teamData] = await Promise.all([
         apiGet('/api/employee/dashboard'),
         apiGet('/api/employee/team'),
-        apiGet('/api/manager/overview'),
-        apiGet('/api/manager/teams'),
-        apiGet('/api/manager/people?filter=all'),
       ]);
-
-      // Map each dataset independently so one failure doesn't block the rest.
       if (dashData) {
         try { window.NOVA.employee = mapDashboard(dashData); }
         catch(e) { console.warn('[Nova] mapDashboard failed:', e); }
@@ -422,15 +411,8 @@ async function initNova() {
         try { window.NOVA.team = mapTeam(teamData); }
         catch(e) { console.warn('[Nova] mapTeam failed:', e); }
       }
-      if (overviewData && teamsData && peopleData) {
-        try {
-          window.NOVA.manager = mapManager(overviewData, teamsData, peopleData);
-          window.dispatchEvent(new CustomEvent('nova-manager-ready'));
-        }
-        catch(e) { console.warn('[Nova] mapManager failed:', e); }
-      } else {
-        console.warn('[Nova] manager fetch incomplete — overview:', !!overviewData, 'teams:', !!teamsData, 'people:', !!peopleData);
-      }
+      await loadManagerData(meData.is_exec_manager);
+      window.dispatchEvent(new CustomEvent('nova-manager-ready'));
 
       console.log('[Nova] Real data loaded for role:', role);
       _resolveDataReady();

@@ -100,3 +100,25 @@ def calculate_streak(user_id: int, conn=None) -> dict:
     }
     set_cache(f"streak_{user_id}", result, "computed", ttl_hours=25)
     return result
+
+
+def get_team_streaks(user_ids: list[int]) -> dict:
+    """
+    Returns {user_id: current_streak_days} for a set of users — for the manager
+    "Your Team" people table (streak pill). Reads the warm streak_{uid} cache;
+    computes any misses per-user via calculate_streak (a manager's direct-report
+    count is small, so the heavier company-wide batch path isn't needed here).
+    """
+    from nova_db.gpt_cache import get_cache
+
+    out: dict[int, int] = {}
+    for uid in user_ids:
+        c = get_cache(f"streak_{uid}")
+        if c:
+            out[uid] = int(c["result"].get("current_streak", 0) or 0)
+        else:
+            try:
+                out[uid] = int(calculate_streak(uid).get("current_streak", 0) or 0)
+            except Exception:
+                out[uid] = 0
+    return out

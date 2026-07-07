@@ -393,6 +393,54 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
     return result
 
 
+def get_team_skill_radar(user_ids: list[int]) -> dict:
+    """
+    Team-averaged skill radar with two series (this month vs last month), for the
+    manager "Your Team" page. Averages each axis across the team.
+
+    Reuses the per-user classify_{uid} cache (which already holds this_month /
+    last_month arrays). get_team_skill_scores() is called first purely to warm
+    those caches for any cold uids in one batch — we then read the two-series
+    arrays back and average them. Returns:
+        {"axes": AXES, "this_month": [...5], "last_month": [...5]}
+    """
+    from nova_db.gpt_cache import get_cache
+
+    if not user_ids:
+        return {"axes": AXES, "this_month": [0.0] * len(AXES), "last_month": [0.0] * len(AXES)}
+
+    # Warm classify_{uid} for any cold uids (side effect of this call).
+    try:
+        get_team_skill_scores(user_ids)
+    except Exception as exc:
+        logger.warning("get_team_skill_radar: warm failed: %s", exc)
+
+    n = len(AXES)
+    this_sum = [0.0] * n
+    last_sum = [0.0] * n
+    counted = 0
+    for uid in user_ids:
+        c = get_cache(f"classify_{uid}")
+        if not c:
+            continue
+        res = c["result"]
+        tm = res.get("this_month") or [0.0] * n
+        lm = res.get("last_month") or [0.0] * n
+        for i in range(n):
+            this_sum[i] += float(tm[i]) if i < len(tm) else 0.0
+            last_sum[i] += float(lm[i]) if i < len(lm) else 0.0
+        counted += 1
+
+    if counted == 0:
+        return {"axes": AXES, "this_month": [0.0] * n, "last_month": [0.0] * n}
+
+    return {
+        "axes":       AXES,
+        "this_month": [round(this_sum[i] / counted, 1) for i in range(n)],
+        "last_month": [round(last_sum[i] / counted, 1) for i in range(n)],
+    }
+
+
 def calculate_ai_proficiency(user_id: int, conn=None) -> float:
     radar = calculate_skill_radar(user_id)
     ai_idx = AXES.index("AI")

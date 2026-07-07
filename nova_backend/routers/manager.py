@@ -1,7 +1,9 @@
 """
 routers/manager.py
-Manager-only endpoints: /api/manager/overview, /api/manager/teams,
-/api/manager/people, /api/manager/people/search.
+Manager endpoints:
+  /api/manager/overview       — company-wide, exec managers only
+  /api/manager/your-team      — direct reports, any manager
+  /api/manager/people/search  — search (exec: company-wide/recursive; else direct)
 """
 
 import asyncio
@@ -10,6 +12,7 @@ import math
 import zlib as _zlib
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -71,6 +74,20 @@ EXEC_USER_NAMES = [
     "eric verdes",
 ]
 RECURSIVE_USER_IDS: set[int] = {5575}
+
+
+def _is_exec_manager(user: CurrentUser) -> bool:
+    """
+    True only for exec-level *managers* — the audience for the company-wide
+    Overview tab. Reuses EXEC_USER_IDS (the same set that governs company-wide
+    people search) but additionally requires the user to actually be a manager
+    (have direct reports), so non-manager execs (QA/dev impersonators) don't get
+    a company-wide dashboard. Today this resolves to Pradeep Menon (5575) alone.
+    """
+    return (
+        user.classmate_user_id in EXEC_USER_IDS
+        and user.role in ("manager", "both")
+    )
 
 
 def _get_all_active_uids() -> list[int]:
@@ -332,18 +349,44 @@ def _get_company_headcount() -> int:
 
 def _get_company_active_this_week() -> int:
     """
-    Active learners this week = employees with at least one active day in the
-    current week, read from the streak cache (week_map). This matches how a
-    user's streak is defined (3-source activity union) rather than only counting
-    when learning credits happen to be awarded.
+    Active learners this week = active employees with at least one active day in
+    the current week, using the same 3-source activity union as the per-user
+    streak (learning credit w/ duration, skill-status update, attended
+    self-study). Counted directly from Fabric in one query so it never depends on
+    the per-user streak_{uid} caches being warm (which previously made this read
+    0 at cold start and stay cached at 0).
     """
-    from nova_db.gpt_cache import get_cache
-    count = 0
-    for uid in _get_all_active_uids():
-        c = get_cache(f"streak_{uid}")
-        if c and any(c["result"].get("week_map") or []):
-            count += 1
-    return count
+    monday = date.today() - timedelta(days=date.today().weekday())
+    sunday = monday + timedelta(days=6)
+    rows = _query(
+        """
+        SELECT COUNT(DISTINCT src.user_id) AS n
+        FROM (
+            SELECT user_id
+            FROM classmate.fact_classmate_learning_credit
+            WHERE is_deleted = 0 AND duration > 0
+              AND credit_date >= ? AND credit_date <= ?
+            UNION
+            SELECT user_id
+            FROM classmate.fact_classmate_user_skill_status
+            WHERE is_deleted = 0 AND is_active = 1
+              AND CAST(modified_on AS DATE) >= ? AND CAST(modified_on AS DATE) <= ?
+            UNION
+            SELECT user_id
+            FROM classmate.fact_classmate_self_study
+            WHERE status = 2 AND is_deleted = 0
+              AND attended_date >= ? AND attended_date <= ?
+        ) src
+        WHERE src.user_id IN (
+            SELECT DISTINCT user_id
+            FROM classmate.dim_classmate_employee_profile
+            WHERE etl_isactive = 1 AND is_active = 1 AND is_deleted = 0
+              AND user_id IS NOT NULL
+        )
+        """,
+        (monday, sunday, monday, sunday, monday, sunday),
+    )
+    return int(rows[0]["n"] or 0) if rows else 0
 
 
 def _get_company_avg_credits_this_quarter() -> float:
@@ -1202,9 +1245,18 @@ def _enrich_search_results(uids: list, rows: list) -> list:
     # batch-computes any cold uids in 3 Fabric queries (not 6×N per user).
     uid_tier = _batch_tier_map(uids, team_norm)
 
+    # Per-person current streak (days) for the shared people-row streak pill.
+    try:
+        from services.streak_service import get_team_streaks
+        uid_streaks = get_team_streaks(uids)
+    except Exception as exc:
+        logger.warning("_enrich_search_results: streaks failed: %s", exc)
+        uid_streaks = {}
+
     result = []
     for uid in uids:
         r = uid_to_row.get(uid, {})
+        ai = uid_ai.get(uid, 0.0)
         result.append({
             "user_id":              uid,
             "name":                 r.get("name", ""),
@@ -1212,9 +1264,9 @@ def _enrich_search_results(uids: list, rows: list) -> list:
             "designation":          r.get("designation", ""),
             "tier":                 uid_tier.get(uid, "—"),
             "credits_this_quarter": round(uid_credits.get(uid, 0.0), 1),
-            "streak":               0,
-            "ai_proficiency":       uid_ai.get(uid, 0.0),
-            "status":               "—",
+            "streak_days":          int(uid_streaks.get(uid, 0)),
+            "ai_proficiency":       ai,
+            "status":               "at_risk" if ai < 20 else "on_track",
             "last_active":          uid_last.get(uid, "never"),
             "scored_by":            uid_scored_by.get(uid, "keywords"),
         })
@@ -1225,7 +1277,12 @@ def _enrich_search_results(uids: list, rows: list) -> list:
 
 @router.get("/manager/overview")
 async def manager_overview(user: CurrentUser = Depends(get_current_user)):
-    _require_manager(user)
+    # Overview is company-wide and restricted to exec managers only.
+    if not _is_exec_manager(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Executive manager access required",
+        )
     if user.classmate_user_id is None:
         raise HTTPException(status_code=503, detail="No user identity")
 
@@ -1297,6 +1354,15 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
             _default_region_snapshot(),
         )
 
+        # Team Leaderboard = per-department AI proficiency (name + % only),
+        # sourced from the same dept_snapshot cache that backed the old Teams
+        # page. Sorted best-first; empty list until the snapshot is warm.
+        dept_snap = _swr("dept_snapshot", _compute_dept_snapshot, [])
+        team_leaderboard = sorted(
+            [{"name": d["dept"], "prof": d["ai_proficient_pct"]} for d in dept_snap],
+            key=lambda x: x["prof"], reverse=True,
+        )
+
     except Exception as exc:
         logger.warning("Fabric unavailable for manager overview uid=%s: %s", mgr_id, exc)
         raise HTTPException(status_code=503, detail="Data unavailable")
@@ -1320,48 +1386,9 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
         },
         "monthly_trend": monthly_trend,
         "proficiency_by_region": proficiency_by_region,
+        "team_leaderboard": team_leaderboard,
         "at_risk":        at_risk,
     }
-
-
-@router.get("/manager/teams")
-async def manager_teams(user: CurrentUser = Depends(get_current_user)):
-    _require_manager(user)
-    if user.classmate_user_id is None:
-        raise HTTPException(status_code=503, detail="No user identity")
-
-    global _dept_snapshot_computing
-    try:
-        from nova_db.gpt_cache import get_cache
-        cached = get_cache("dept_snapshot")
-
-        if not cached:
-            if not _dept_snapshot_computing:
-                _dept_snapshot_computing = True
-                loop = asyncio.get_event_loop()
-                loop.run_in_executor(_executor, _compute_dept_snapshot)
-            return {"departments": []}
-
-        raw_depts = cached["result"]
-        tier_keys = ["platinum", "diamond", "gold", "silver", "bronze", "starter"]
-        departments = [
-            {
-                "name":              d["dept"],
-                "headcount":         d["headcount"],
-                "avg_credits":       0.0,
-                "ai_proficient_pct": d["ai_proficient_pct"],
-                "trend_pct":         d.get("trend_pct", 0.0),
-                "top_course":        "N/A",
-                "tier_distribution": {k: 0 for k in tier_keys},
-            }
-            for d in raw_depts
-        ]
-
-    except Exception as exc:
-        logger.warning("Fabric unavailable for manager teams: %s", exc)
-        raise HTTPException(status_code=503, detail="Data unavailable")
-
-    return {"departments": departments}
 
 
 def _batch_tier_map(uids: list, team_norm: dict) -> dict:
@@ -1407,7 +1434,8 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
     from services.skill_service import get_team_skill_scores
     from nova_db.gpt_cache import get_cache, set_cache
 
-    _cache_key = f"people_list_{mgr_id}_{filter_val}"
+    # v2 = payload now carries streak_days + designation (was streak:0).
+    _cache_key = f"people_list_v2_{mgr_id}_{filter_val}"
     _cached = get_cache(_cache_key)
     if _cached:
         return _cached["result"]
@@ -1455,6 +1483,15 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
         logger.warning("get_team_skill_scores failed: %s", exc)
         team_norm = {}
 
+    # Per-person current streak (days) — reads warm streak_{uid} caches,
+    # computes any misses per-user.
+    try:
+        from services.streak_service import get_team_streaks
+        uid_streaks = get_team_streaks(uids)
+    except Exception as exc:
+        logger.warning("get_team_streaks failed: %s", exc)
+        uid_streaks = {}
+
     # Batch tier lookup — reads warm tier_{uid} caches and batch-computes any
     # cold uids in 3 Fabric queries (see _batch_tier_map), faithfully matching
     # calculate_tier() so the manager view matches the employee view.
@@ -1489,9 +1526,10 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
             "user_id":              uid,
             "name":                 r["name"],
             "department":           r["department"] or "Unknown",
+            "designation":          r.get("designation", ""),
             "tier":                 emp_tier,
             "credits_this_quarter": round(emp_credits, 1),
-            "streak":               0,
+            "streak_days":          int(uid_streaks.get(uid, 0)),
             "ai_proficiency":       ai_proficiency,
             "status":               emp_status,
             "last_active":          last_active_str,
@@ -1526,11 +1564,37 @@ def _overlay_current_tiers(employees: list) -> list:
     return employees
 
 
-@router.get("/manager/people")
-async def manager_people(
+def _compute_your_team(mgr_id: int) -> dict:
+    """Team radar + badge summary for a manager's direct reports. Writes its own
+    cache (key your_team_{mgr_id}) so it can be served via _swr."""
+    from services.skill_service import get_team_skill_radar
+    from nova_db.badges import get_team_badge_summary
+    from nova_db.gpt_cache import set_cache
+
+    reports = get_direct_reports(None, mgr_id)
+    uids = [r["user_id"] for r in reports]
+    n = len(uids)
+
+    radar = get_team_skill_radar(uids)
+
+    badge_summary = get_team_badge_summary(uids)
+    badge_summary["avg_per_person"] = round(badge_summary["total"] / n, 1) if n else 0.0
+
+    result = {"team_size": n, "radar": radar, "badges": badge_summary}
+    set_cache(f"your_team_{mgr_id}", result, "computed", ttl_hours=25)
+    return result
+
+
+@router.get("/manager/your-team")
+async def manager_your_team(
     filter: str = Query("all", pattern="^(all|on_track|at_risk)$"),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """
+    Direct-reports-only team view — available to ANY manager (no exec gate).
+    Returns the enriched people list (with streak_days), a team-averaged skill
+    radar (this vs last month), and a team badge summary.
+    """
     _require_manager(user)
     if user.classmate_user_id is None:
         raise HTTPException(status_code=503, detail="No user identity")
@@ -1539,11 +1603,22 @@ async def manager_people(
     try:
         employees = await _run(_build_people_list, mgr_id, filter)
         employees = await _run(_overlay_current_tiers, employees)
+        extras    = _swr(f"your_team_{mgr_id}", partial(_compute_your_team, mgr_id),
+                         {"team_size": 0,
+                          "radar": {"axes": ["AI", "Cloud", "Frontend", "Backend", "Data"],
+                                    "this_month": [0.0] * 5, "last_month": [0.0] * 5},
+                          "badges": {"total": 0, "avg_per_person": 0.0, "this_month_count": 0,
+                                     "by_tier": {"platinum": 0, "diamond": 0, "gold": 0,
+                                                 "silver": 0, "bronze": 0}}})
     except Exception as exc:
-        logger.warning("Fabric unavailable for manager people uid=%s: %s", mgr_id, exc)
+        logger.warning("Fabric unavailable for your-team uid=%s: %s", mgr_id, exc)
         raise HTTPException(status_code=503, detail="Data unavailable")
 
-    return {"employees": employees}
+    return {
+        "employees": employees,
+        "radar":     extras["radar"],
+        "badges":    extras["badges"],
+    }
 
 
 @router.get("/manager/people/search")

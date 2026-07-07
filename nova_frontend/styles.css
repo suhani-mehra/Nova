@@ -547,3 +547,25 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 .streak-topbar-flame{font-size:17px;line-height:1}
 .streak-topbar-num{font-size:17px;font-weight:800;background:linear-gradient(135deg,#A634FF,#2ACCFF);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1}
 .streak-topbar-lab{font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.03em}
+
+/* ── Manager redesign: two-column layout ── */
+.mgr-cols{display:flex;gap:22px;align-items:stretch}
+.mgr-col-main{flex:1.75;min-width:0;display:flex;flex-direction:column;gap:22px}
+.mgr-col-rail{flex:1;min-width:0;display:flex;flex-direction:column;gap:22px}
+@media (max-width:1000px){ .mgr-cols{flex-direction:column} }
+
+/* gradient hero stat cards (Active learners / Team badges) */
+.hero-card{border-radius:var(--radius);padding:24px 26px;color:#fff}
+.hero-purple{background:linear-gradient(135deg,#A634FF,#FF4398);box-shadow:0 12px 30px rgba(166,52,255,.28)}
+.hero-blue{background:linear-gradient(135deg,#2ACCFF,#5400DC);box-shadow:0 12px 30px rgba(84,0,220,.24)}
+.hero-lab{display:flex;align-items:center;gap:10px;font-size:13.5px;font-weight:700;opacity:.94}
+.hero-num{font-size:52px;font-weight:800;letter-spacing:-.03em;margin-top:10px;line-height:1}
+.hero-sub{font-size:13.5px;font-weight:600;opacity:.94;margin-top:8px}
+.hero-sub b{font-weight:800}
+
+/* team leaderboard rows */
+.leader-row{display:flex;align-items:center;gap:12px;padding:9px 8px;border-radius:11px;transition:background .14s}
+.leader-row:hover{background:#faf9fe}
+
+/* 🔥 streak pill next to a person's name */
+.streak-pill{display:inline-flex;align-items:center;gap:3px;background:rgba(255,106,44,.12);color:#E8551F;font-size:11.5px;font-weight:800;padding:2px 8px;border-radius:999px;white-space:nowrap;line-height:1.4}

@@ -2,21 +2,114 @@
 const { useState:useStateM } = React;
 
 const tierByKey = k => NOVA.TIERS.find(t=>t.key===k);
-const trendIco = d => d==='up'?Icons.up({size:14,sw:2.4}):d==='down'?Icons.down({size:14,sw:2.4}):Icons.flat({size:14,sw:2.4});
+const _fmtN = n => Math.round(n||0).toLocaleString();
+// Lift the radar's visual floor so a 0 sits at the 25% ring instead of collapsing
+// to the center — matches the employee Skill Growth radar (_radarShift).
+const _mgrRadarShift = arr => (arr||[]).map(v => 25 + Math.round((v / 100) * 75));
 
-/* ---------------- OVERVIEW ---------------- */
+/* ---------- streak pill (shared by people rows) ---------- */
+function StreakPill({days}){
+  if(!days || days<=0) return null;
+  return h('span',{className:'streak-pill'}, '🔥', days);
+}
+
+/* ---------- Proficiency by Vertical (ranked bars, STATIC placeholder) ---------- */
+/* TODO: replace with a real API once a business-vertical taxonomy exists. */
+function VerticalBars({data}){
+  const [hover,setHover]=useStateM(null);
+  const H=280, plotH=H-58;
+  return h('div',{style:{position:'relative',width:'100%'}},
+    h('div',{style:{display:'flex',alignItems:'flex-end',gap:10,height:H}},
+      data.map((v,i)=>{
+        const active=hover===i;
+        return h('div',{key:i,onMouseEnter:()=>setHover(i),onMouseLeave:()=>setHover(null),
+          style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'flex-end',height:'100%',cursor:'pointer'}},
+          h('div',{style:{fontSize:14,fontWeight:800,color:v.top?'#FF4398':'var(--ink)',marginBottom:6}}, v.pct+'%'),
+          h('div',{style:{width:'100%',maxWidth:46,height:(v.pct/100)*plotH,borderRadius:'7px 7px 0 0',
+            background:v.top?'linear-gradient(180deg,#FF4398,#C21178)':'linear-gradient(180deg,#B266FF,#7d1fd0)',
+            filter:active?'brightness(1.08)':'none',transition:'filter .15s'}}),
+          h('div',{style:{fontSize:12,fontWeight:700,color:'var(--ink-soft)',marginTop:8,textAlign:'center',lineHeight:1.15}}, v.name),
+          h('div',{style:{fontSize:10.5,fontWeight:600,color:'var(--muted)',marginTop:2}}, _fmtN(v.earners)));
+      })),
+    hover!==null && h('div',{className:'chart-tip',style:{left:((hover+0.5)/data.length*100)+'%',top:0}},
+      h('div',{className:'t1'}, data[hover].name+' · '+data[hover].pct+'% proficient'),
+      h('div',{style:{fontSize:11,color:'#b7b9cc',fontWeight:600}}, _fmtN(data[hover].earners)+' earners'))
+  );
+}
+
+/* ---------- Specialization Landscape (horizontal stacked, STATIC placeholder) ---------- */
+/* TODO: replace with a real API once a specialization-track taxonomy exists. */
+function SpecializationBar({data}){
+  const [hover,setHover]=useStateM(null);
+  return h('div',null,
+    h('div',{style:{display:'flex',height:34,borderRadius:9,overflow:'hidden'}},
+      data.map((t,i)=>h('div',{key:i,onMouseEnter:()=>setHover(i),onMouseLeave:()=>setHover(null),
+        style:{width:t.pct+'%',background:t.col,display:'grid',placeItems:'center',
+          borderRight:i<data.length-1?'2px solid var(--card)':'none',cursor:'pointer',
+          filter:hover===i?'brightness(1.1)':'none',transition:'filter .15s'}},
+        t.pct>=12?h('span',{style:{fontSize:11.5,fontWeight:800,color:'#fff'}}, t.pct+'%'):null))),
+    h('div',{style:{display:'flex',flexDirection:'column',gap:9,marginTop:16}},
+      data.map((t,i)=>h('div',{key:i,onMouseEnter:()=>setHover(i),onMouseLeave:()=>setHover(null),
+        style:{display:'flex',alignItems:'center',gap:10,fontSize:12.5,cursor:'pointer',
+          opacity:(hover===null||hover===i)?1:.5,transition:'opacity .15s'}},
+        h('span',{style:{width:12,height:12,borderRadius:4,background:t.col,flex:'0 0 auto'}}),
+        h('span',{style:{fontWeight:700,color:'var(--ink)',flex:1,minWidth:0}}, t.track),
+        h('span',{style:{fontWeight:800,color:'var(--ink)'}}, t.pct+'%'),
+        h('span',{style:{fontWeight:600,color:'var(--muted)',width:96,textAlign:'right'}}, _fmtN(t.earners)+' earners'))))
+  );
+}
+
+/* ---------- Team Leaderboard (REAL per-dept proficiency: name + bar + %) ---------- */
+function TeamLeaderboard({rows}){
+  if(!rows || !rows.length){
+    return h('div',{style:{padding:'24px 6px',color:'var(--muted)',fontSize:13,fontWeight:600}},'No team data yet.');
+  }
+  return h('div',{style:{display:'flex',flexDirection:'column',gap:2}},
+    rows.slice(0,6).map((t,i)=>h('div',{key:i,className:'leader-row'},
+      h('div',{style:{width:20,fontSize:13,fontWeight:800,color:'var(--muted)'}}, (i+1)),
+      h('div',{style:{flex:1,minWidth:0}},
+        h('div',{style:{fontWeight:800,fontSize:14,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}, t.name),
+        h('div',{className:'bar-wide',style:{marginTop:6}}, h('i',{style:{width:t.prof+'%',background:'linear-gradient(90deg,#2ACCFF,#A634FF)'}}))),
+      h('div',{style:{fontWeight:800,fontSize:15,width:44,textAlign:'right'}}, t.prof+'%')))
+  );
+}
+
+/* ---------- Badges by tier (REAL, horizontal bars) ---------- */
+function BadgesByTier({byTier}){
+  const order=['platinum','diamond','gold','silver','bronze'];
+  const rows=order.map(k=>({key:k, name:(tierByKey(k)||{}).name||k, color:(tierByKey(k)||{}).color||'#9aa2b1', val:byTier[k]||0}));
+  const max=Math.max(1,...rows.map(r=>r.val));
+  return h('div',{style:{display:'flex',flexDirection:'column',justifyContent:'space-around',flex:1,minHeight:0,gap:12}},
+    rows.map((b,i)=>h('div',{key:i,style:{display:'flex',alignItems:'center',gap:12}},
+      h('div',{style:{width:66,fontSize:12.5,fontWeight:700,color:'var(--ink-soft)',display:'flex',alignItems:'center',gap:6}},
+        h('span',{style:{width:9,height:9,borderRadius:'50%',background:b.color,flex:'0 0 auto'}}), b.name),
+      h('div',{className:'bar-wide',style:{flex:1}}, h('i',{style:{width:(b.val/max*100)+'%',background:b.color}})),
+      h('div',{style:{width:40,textAlign:'right',fontWeight:800,fontSize:13.5}}, _fmtN(b.val))))
+  );
+}
+
+/* ---------------- OVERVIEW (exec managers only) ---------------- */
 function MgrOverview(){
   const M=NOVA.manager;
-  const kpiIc = {spark:Icons.spark, users:Icons.users, shield:Icons.shield, alert:Icons.alert};
+  const O=M && M.overview;
+  const S=(M && M.static) || {};
   const [chartTab,setChartTab]=useStateM('trend');   // 'trend' (line) | 'region' (bars)
-  const region=M.proficiencyByRegion;
+
+  if(!O){
+    return h('div',{className:'page'},
+      h('div',{style:{padding:'48px 0',textAlign:'center',color:'var(--muted)',fontSize:14,fontWeight:600}},
+        'Loading company overview…'));
+  }
+
+  const region=O.proficiencyByRegion;
+  const AL=O.activeLearners;
 
   const trendView = [
-    h(LineChart,{key:'lc', months:M.months, proficiency:M.series.proficiency, active:M.series.active, target:M.target, total:M.total}),
+    h(LineChart,{key:'lc', months:O.months, proficiency:O.series.proficiency, active:O.series.active, target:O.target, total:O.total}),
     h('div',{key:'lg',className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
       h('div',{className:'it'}, h('span',{className:'sw',style:{background:'linear-gradient(90deg,#2ACCFF,#A634FF,#FF4398)'}}),'% AI-proficient employees'),
       h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#2ACCFF'}}),'% active learners'),
-      h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#FF4398'}}),`Target ${M.target}%`)),
+      h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#FF4398'}}),`Target ${O.target}%`)),
   ];
 
   const regionView = [
@@ -32,60 +125,52 @@ function MgrOverview(){
   return h('div',{className:'page'},
     h('div',{className:'page-head'},
       h('h1',{className:'greeting'},'Learning Overview'),
-      h('div',{className:'sub'},`Company-wide progress toward AI proficiency · ${M.total.toLocaleString()} employees`)),
-    h('div',{className:'kpi-grid', style:{marginBottom:22}},
-      M.kpis.map((k,i)=>h('div',{className:'kpi-card',key:i},
-        h('div',{className:'top'},
-          h('div',{className:'ic',style:{background:k.tint,color:k.col}}, (kpiIc[k.ic]||Icons.spark)({size:22,color:k.col})),
-          h('div',{className:`trend ${k.dir}${k.badWhenUp?' invert':''}`}, trendIco(k.dir), k.trend)),
-        h('div',{className:'num'},k.num),
-        h('div',{className:'lab',dangerouslySetInnerHTML:{__html:k.lab}})))
-    ),
-    h('div',{className:'card', style:{marginBottom:22}},
-      h('div',{className:'card-head-row', style:{marginBottom:16}},
-        h('div',null,
-          h('div',{className:'card-title'}, chartTab==='trend'?'AI Proficiency Trend':'AI Proficiency by Region'),
-          h('div',{className:'card-sub'}, chartTab==='trend'
-            ? '% of all employees with AI proficiency ≥ 30%, measured at each quarter end.'
-            : "Each region's own % proficient at each level, vs. the company-wide actual and goal.")),
-        h('div',{className:'seg'},
-          h('button',{className:chartTab==='trend'?'on':'', onClick:()=>setChartTab('trend')},'Trend'),
-          h('button',{className:chartTab==='region'?'on':'', onClick:()=>setChartTab('region')},'By region'))),
-      chartTab==='trend' ? trendView : regionView
+      h('div',{className:'sub'},`Company-wide progress toward AI proficiency · ${O.total.toLocaleString()} employees`)),
+
+    h('div',{className:'mgr-cols'},
+      // ── left column ──
+      h('div',{className:'mgr-col-main'},
+        h('div',{className:'card'},
+          h('div',{className:'card-head-row', style:{marginBottom:16}},
+            h('div',null,
+              h('div',{className:'card-title'}, chartTab==='trend'?'AI Proficiency Trend':'AI Proficiency by Region'),
+              h('div',{className:'card-sub'}, chartTab==='trend'
+                ? '% of all employees with AI proficiency ≥ 30%, measured at each quarter end.'
+                : "Each region's own % proficient at each level, vs. the company-wide actual and goal.")),
+            h('div',{className:'seg'},
+              h('button',{className:chartTab==='trend'?'on':'', onClick:()=>setChartTab('trend')},'Trend'),
+              h('button',{className:chartTab==='region'?'on':'', onClick:()=>setChartTab('region')},'By region'))),
+          chartTab==='trend' ? trendView : regionView
+        ),
+        h('div',{className:'card', style:{flex:1,display:'flex',flexDirection:'column'}},
+          h('div',{className:'card-title'},'Proficiency by Vertical'),
+          h('div',{className:'card-sub', style:{marginBottom:14}},'% AI-proficient within each business vertical, ranked.'),
+          h('div',{style:{flex:1,display:'flex',alignItems:'flex-end'}}, h(VerticalBars,{data:S.verticals||[]})))
+      ),
+
+      // ── right rail ──
+      h('div',{className:'mgr-col-rail'},
+        h('div',{className:'hero-card hero-purple'},
+          h('div',{className:'hero-lab'}, Icons.users({size:16,color:'#fff'}), 'Active learners this week'),
+          h('div',{className:'hero-num'}, _fmtN(AL.count)),
+          h('div',{className:'hero-sub'}, `${AL.pct.toFixed(1)}% of ${AL.total.toLocaleString()} employees · `,
+            h('b',null, AL.trendStr))),
+        h('div',{className:'card'},
+          h('div',{className:'card-title'},'Specialization Landscape'),
+          h('div',{className:'card-sub', style:{marginBottom:16}},'Workforce across horizontal specialization tracks.'),
+          h(SpecializationBar,{data:S.specialization||[]})),
+        h('div',{className:'card', style:{flex:1}},
+          h('div',{className:'card-title', style:{marginBottom:16}},'Team Leaderboard'),
+          h(TeamLeaderboard,{rows:O.teamLeaderboard}))
+      )
     )
   );
 }
 
-/* ---------------- TEAMS ---------------- */
-function MgrTeams(){
+/* ---------------- YOUR TEAM (all managers, direct reports only) ---------------- */
+function MgrYourTeam(){
   const M=NOVA.manager;
-  const sorted=[...M.teams].sort((a,b)=>b.prof-a.prof);
-  const stLabel={ok:'On track', warn:'Needs focus', risk:'Falling behind'};
-  return h('div',{className:'page'},
-    h('div',{className:'page-head'},
-      h('h1',{className:'greeting'},'Team Progress'),
-      h('div',{className:'sub'},'How much progress each team is making toward AI proficiency.')),
-    h('div',{className:'card'},
-      h('div',{className:'team-head'},
-        h('div',null,'Team'), h('div',null,'Members'),
-        h('div',null,'AI proficiency'), h('div',{style:{textAlign:'right'}},'Status')),
-      sorted.map((t,i)=>h('div',{className:'team-row',key:i},
-        h('div',null,
-          h('div',{className:'tname'}, t.name),
-          h('div',{className:'tmeta'}, `Trend ${t.trend} vs last month`)),
-        h('div',{style:{fontWeight:700,color:'var(--ink-soft)'}}, t.members.toLocaleString()),
-        h('div',{style:{display:'flex',alignItems:'center',gap:14}},
-          h('div',{className:'bar-wide',style:{flex:1}}, h('i',{style:{width:t.prof+'%', background:`linear-gradient(90deg,${t.col}bb,${t.col})`}})),
-          h('div',{className:'pct-strong',style:{width:46,textAlign:'right'}}, t.prof+'%')),
-        h('div',{style:{textAlign:'right'}},
-          h('span',{className:`status ${t.status}`}, h('span',{className:'dot'}), stLabel[t.status]))))
-    )
-  );
-}
-
-/* ---------------- PEOPLE ---------------- */
-function MgrPeople(){
-  const M=NOVA.manager;
+  const T=(M && M.team) || {people:[], radar:null, badges:null, size:0, riskCount:0};
   const [filter,setFilter]=useStateM('all');
   const [searchQ,setSearchQ]=useStateM('');
   const [searchResults,setSearchResults]=useStateM(null);
@@ -93,125 +178,112 @@ function MgrPeople(){
   const [searchScope,setSearchScope]=useStateM('');
   const debounceRef=React.useRef(null);
 
-  const filtered = M.people.filter(p=>{
+  const people=T.people||[];
+  const filtered = people.filter(p=>{
     if(filter==='all') return true;
     if(filter==='on_track') return p.status==='ok';
     if(filter==='risk') return p.status==='risk';
     return true;
   });
-  const riskCount=M.people.filter(p=>p.status==='risk').length;
+  const riskCount=people.filter(p=>p.status==='risk').length;
 
   React.useEffect(()=>{
     if(debounceRef.current) clearTimeout(debounceRef.current);
-    if(!searchQ.trim()){
-      setSearchResults(null);
-      setSearchScope('');
-      return;
-    }
+    if(!searchQ.trim()){ setSearchResults(null); setSearchScope(''); return; }
     debounceRef.current=setTimeout(async ()=>{
       setSearching(true);
       try{
         const res=await apiGet('/api/manager/people/search?q='+encodeURIComponent(searchQ.trim()));
-        if(res){
-          setSearchResults(res.employees||[]);
-          setSearchScope(res.search_scope||'');
-        }
-      }catch(e){
-        console.warn('[Nova] search failed:',e);
-      }finally{
-        setSearching(false);
-      }
+        if(res){ setSearchResults(res.employees||[]); setSearchScope(res.search_scope||''); }
+      }catch(e){ console.warn('[Nova] search failed:',e); }
+      finally{ setSearching(false); }
     },350);
   },[searchQ]);
 
   const isSearching=searchQ.trim().length>0;
   const displayList=isSearching?(searchResults||[]):filtered;
 
+  const radar=T.radar;
+  const badges=T.badges||{total:0,avgPerPerson:0,thisMonthCount:0,byTier:{}};
+
   return h('div',{className:'page'},
+    h('div',{className:'page-head'},
+      h('h1',{className:'greeting'},'Your Team'),
+      h('div',{className:'sub'},`Your direct reports · ${T.size} ${T.size===1?'person':'people'} — proficiency, badges, and streaks.`)),
+
+    // top row: radar + badges
+    h('div',{className:'mgr-cols', style:{marginBottom:22}},
+      h('div',{className:'mgr-col-main card'},
+        h('div',{className:'card-title'},'Team Average Proficiency'),
+        h('div',{className:'card-sub'},'Mean proficiency across your team in each skill category.'),
+        radar ? h(RadarChart,{axes:radar.axes, thisMonth:_mgrRadarShift(radar.this_month), lastMonth:_mgrRadarShift(radar.last_month), size:300})
+              : h('div',{style:{padding:'40px 0',textAlign:'center',color:'var(--muted)',fontWeight:600}},'No skill data yet.'),
+        h('div',{className:'chart-legend', style:{justifyContent:'center',marginTop:8}},
+          h('div',{className:'it'}, h('span',{style:{width:14,height:14,borderRadius:4,background:'#A634FF',display:'inline-block'}}),'This month'),
+          h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#2ACCFF'}}),'Last month'))),
+      h('div',{className:'mgr-col-rail'},
+        h('div',{className:'hero-card hero-blue'},
+          h('div',{className:'hero-lab'}, '🎖', 'Badges accumulated by your team'),
+          h('div',{className:'hero-num'}, _fmtN(badges.total)),
+          h('div',{className:'hero-sub'}, `Across ${T.size} ${T.size===1?'person':'people'} · avg ${badges.avgPerPerson} each · `,
+            h('b',null, (badges.thisMonthCount>=0?'+':'')+badges.thisMonthCount+' this month'))),
+        h('div',{className:'card', style:{flex:1,display:'flex',flexDirection:'column'}},
+          h('div',{className:'card-title', style:{fontSize:16,marginBottom:16}},'Badges by tier'),
+          h(BadgesByTier,{byTier:badges.byTier})))
+    ),
+
+    // people table
     h('div',{className:'page-head', style:{display:'flex',alignItems:'flex-end',justifyContent:'space-between',gap:16,flexWrap:'wrap'}},
       h('div',null,
-        h('h1',{className:'greeting'},'Individual Progress'),
-        h('div',{className:'sub'},
-          isSearching
-            ? `${displayList.length} result${displayList.length===1?'':'s'} for "${searchQ}"`
-            : 'Who is moving forward — and who needs a nudge.'
-        )),
+        h('div',{className:'card-title', style:{fontSize:19}},'Individual Progress'),
+        h('div',{className:'card-sub'},
+          isSearching ? `${displayList.length} result${displayList.length===1?'':'s'} for "${searchQ}"`
+                      : 'Who is moving forward — and who needs a nudge.')),
       !isSearching && h('div',{className:'seg'},
         h('button',{className:filter==='all'?'on':'', onClick:()=>setFilter('all')},'All'),
         h('button',{className:filter==='on_track'?'on':'', onClick:()=>setFilter('on_track')},'On track'),
         h('button',{className:filter==='risk'?'on':'', onClick:()=>setFilter('risk')},`At risk (${riskCount})`))),
 
     h('div',{className:'people-search-wrap'},
-      h('input',{
-        type:'text',
-        placeholder:'Search employees…',
-        value:searchQ,
+      h('input',{type:'text', placeholder:'Search your team…', value:searchQ,
         onChange:e=>setSearchQ(e.target.value),
-        style:{
-          width:'100%',
-          padding:'10px 16px 10px 40px',
-          borderRadius:12,
-          border:'1.5px solid var(--line)',
-          background:'var(--card)',
-          fontSize:14,
-          fontWeight:600,
-          color:'var(--ink)',
-          outline:'none',
-          boxSizing:'border-box',
-          transition:'border-color .15s',
-        }
-      }),
-      h('span',{style:{
-        position:'absolute',left:13,top:'50%',
-        transform:'translateY(-50%)',
-        color:'var(--muted)',
-        pointerEvents:'none',
-        display:'flex',
-      }}, Icons.search ? Icons.search({size:16}) : h('span',null,'🔍')),
-      searchQ && h('button',{
-        onClick:()=>{setSearchQ('');setSearchResults(null);},
-        style:{
-          position:'absolute',right:12,top:'50%',
-          transform:'translateY(-50%)',
-          background:'none',border:0,
-          color:'var(--muted)',fontSize:18,
-          cursor:'pointer',lineHeight:1,
-          padding:'0 2px',
-        }
-      },'\xD7')
+        style:{width:'100%',padding:'10px 16px 10px 40px',borderRadius:12,border:'1.5px solid var(--line)',
+          background:'var(--card)',fontSize:14,fontWeight:600,color:'var(--ink)',outline:'none',boxSizing:'border-box'}}),
+      h('span',{style:{position:'absolute',left:13,top:'50%',transform:'translateY(-50%)',color:'var(--muted)',pointerEvents:'none',display:'flex'}},
+        Icons.search ? Icons.search({size:16}) : h('span',null,'🔍')),
+      searchQ && h('button',{onClick:()=>{setSearchQ('');setSearchResults(null);},
+        style:{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',background:'none',border:0,
+          color:'var(--muted)',fontSize:18,cursor:'pointer',lineHeight:1,padding:'0 2px'}},'\xD7')
     ),
 
     h('div',{className:'card'},
       searching && h('div',{style:{padding:'12px 16px',color:'var(--muted)',fontSize:14,fontWeight:600}},'Searching…'),
       isSearching && !searching && searchScope==='recursive' &&
-        h('div',{className:'search-result-note'},
-          h('b',null,'Extended view:'),' showing all levels below you'),
+        h('div',{className:'search-result-note'}, h('b',null,'Extended view:'),' showing all levels below you'),
       isSearching && !searching && searchScope==='company' &&
-        h('div',{className:'search-result-note'},
-          h('b',null,'Exec view:'),' searching company-wide'),
+        h('div',{className:'search-result-note'}, h('b',null,'Exec view:'),' searching company-wide'),
       isSearching && !searching && searchResults && searchResults.length===0 &&
         h('div',{style:{padding:'24px 16px',color:'var(--muted)',fontSize:14,fontWeight:600,textAlign:'center'}},
           'No employees found for "',searchQ,'"'),
       h('div',{className:'ppl-head'},
         h('div',null,'Employee'), h('div',null,'Tier'),
-        h('div',null,'AI proficiency'),
-        h('div',{style:{textAlign:'right'}},'Status')),
+        h('div',null,'AI proficiency'), h('div',{style:{textAlign:'right'}},'Status')),
       displayList.map((p,i)=>{
         const tierKey=(p.tier&&p.tier!=='—')?p.tier:'starter';
         const t=tierByKey(tierKey)||tierByKey('starter');
         const isSearch=isSearching;
-        // prof comes from mapped people (p.prof) or raw search results (p.ai_proficiency).
-        // Status is purely proficiency-based: < 20% = at risk, otherwise on track.
         const prof=(p.prof!=null)?p.prof:Math.round(p.ai_proficiency||0);
+        const streak=(p.streak!=null)?p.streak:(p.streak_days||0);
         const atRisk=prof<20;
         return h('div',{className:'ppl-row',key:p.user_id||i},
           h('div',{className:'who'},
             h(Avatar,{name:p.name, grad:p.av||['#A634FF','#FF4398'], size:'s'}),
             h('div',{style:{minWidth:0}},
-              h('div',{className:'nm'},p.name),
+              h('div',{className:'nm', style:{display:'flex',alignItems:'center',gap:8}},
+                h('span',null,p.name), h(StreakPill,{days:streak})),
               h('div',{className:'rl'},isSearch
                 ? (p.department||'')+(p.designation?(' · '+p.designation):'')
-                : `${p.role||p.department||''} · ${p.team||p.department||''}`))),
+                : `${p.role||p.department||''}`))),
           h('div',null, t ? h('span',{className:'tier-pill'},
             h(Hex,{color:t.color, glyph:tierHexInner(tierKey), active:false, size:24}),
             h('span',{style:{color:t.color}}, p.tier==='—'?'—':t.name))
@@ -222,11 +294,10 @@ function MgrPeople(){
             h('div',{className:'pct-strong',style:{width:42}}, prof+'%')),
           h('div',{style:{textAlign:'right'}},
             h('span',{className:`status ${atRisk?'risk':'ok'}`},
-              h('span',{className:'dot'}),
-              atRisk?'At risk':'On track')));
+              h('span',{className:'dot'}), atRisk?'At risk':'On track')));
       })
     )
   );
 }
 
-Object.assign(window,{MgrOverview, MgrTeams, MgrPeople});
+Object.assign(window,{MgrOverview, MgrYourTeam});

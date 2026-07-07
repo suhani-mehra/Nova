@@ -70,6 +70,56 @@ def award_badge(user_id: int, tier: str, month: str, awarded_at: str) -> None:
         c.commit()
 
 
+_TIER_KEYS = ("platinum", "diamond", "gold", "silver", "bronze")
+
+
+def get_team_badge_summary(user_ids: list[int], this_month: str | None = None) -> dict:
+    """
+    Aggregate badge stats for a set of users — for the manager "Your Team" page.
+
+    Returns:
+        {
+          "total":            <all-time badge rows across these users>,
+          "by_tier":          {platinum, diamond, gold, silver, bronze},
+          "this_month_count": <rows whose month == this_month 'YYYY-MM'>,
+        }
+    `this_month` defaults to the current calendar month (UTC). starter is never
+    awarded, so it's not in by_tier. Single IN(...) query, not a per-user loop.
+    """
+    by_tier = {k: 0 for k in _TIER_KEYS}
+    if not user_ids:
+        return {"total": 0, "by_tier": by_tier, "this_month_count": 0}
+
+    if this_month is None:
+        from datetime import datetime, timezone
+        this_month = datetime.now(timezone.utc).strftime("%Y-%m")
+
+    ph = ",".join("?" * len(user_ids))
+    with _conn() as c:
+        rows = c.execute(
+            f"""
+            SELECT tier, month, COUNT(*) AS n
+            FROM user_badges
+            WHERE user_id IN ({ph})
+            GROUP BY tier, month
+            """,
+            tuple(user_ids),
+        ).fetchall()
+
+    total = 0
+    this_month_count = 0
+    for r in rows:
+        n = int(r["n"])
+        total += n
+        tier = (r["tier"] or "").lower()
+        if tier in by_tier:
+            by_tier[tier] += n
+        if r["month"] == this_month:
+            this_month_count += n
+
+    return {"total": total, "by_tier": by_tier, "this_month_count": this_month_count}
+
+
 def badges_exist_for(month: str) -> bool:
     """True if any badge has been awarded for the given 'YYYY-MM' month.
     Used by the nightly job to gate/backfill the monthly award."""

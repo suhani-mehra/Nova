@@ -254,6 +254,8 @@ def me(user: CurrentUser = Depends(get_current_user)):
     Dev mode (AZURE_TENANT_ID=placeholder): returns stub user without hitting DB.
     Post-AD: resolves classmate_user_id → dim_employee_profile row.
     """
+    is_exec_manager = manager._is_exec_manager(user)
+
     if user.classmate_user_id is None:
         # Production path before Classmate user lookup is wired
         return {
@@ -261,6 +263,7 @@ def me(user: CurrentUser = Depends(get_current_user)):
             "name":             user.name,
             "email":            user.email,
             "role":             user.role,
+            "is_exec_manager":  is_exec_manager,
             "department_code":  None,
             "designation_code": None,
             "employee_id":      None,
@@ -281,6 +284,7 @@ def me(user: CurrentUser = Depends(get_current_user)):
             "name":             p["name"],
             "email":            p["email_id"],
             "role":             user.role,
+            "is_exec_manager":  is_exec_manager,
             "department_code":  p["department"],
             "designation_code": p["designation"],
             "employee_id":      p["employee_id"],
@@ -293,6 +297,7 @@ def me(user: CurrentUser = Depends(get_current_user)):
         "name":             user.name,
         "email":            user.email,
         "role":             user.role,
+        "is_exec_manager":  is_exec_manager,
         "department_code":  None,
         "designation_code": None,
         "employee_id":      None,
