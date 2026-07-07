@@ -62,10 +62,11 @@ Key tables and the **status codes** that matter:
 - `fact_classmate_user_skill_status` / `fact_classmate_self_study` — extra activity signals
   (used for "active day" detection; self-study **`status = 2` = attended**).
 - `dim_classmate_employee_profile` — org data (manager, department_code, designation,
-  display_name). This is a **slowly-changing dimension with many rows per person**, so every
-  read must deduplicate to the latest row per `user_id` (via a `ROW_NUMBER() … ORDER BY
-  modified_on DESC` CTE — the `_DEDUP_CTE`). Forgetting this fans out ~73k rows for ~13k
-  people.
+  display_name, `country_code`). This is a **slowly-changing dimension with many rows per
+  person**, so every read must deduplicate to the latest row per `user_id` (via a
+  `ROW_NUMBER() … ORDER BY modified_on DESC` CTE — the `_DEDUP_CTE`). Forgetting this fans out
+  ~73k rows for ~13k people. `country_code` is a non-ISO Classmate code (e.g. `IND`, `SER`,
+  `UZKH`) — see `core/geo.py` for the confirmed mapping to region.
 - `dim_classmate_user` — identity (email/`aduser_name`, names).
 - `dim_classmate_second_level_category` / `dim_classmate_certificate` — the course/cert
   catalog (source of items to grade).
@@ -160,6 +161,14 @@ axis_score = min(100, (raw_axis_sum / 5000) ^ 0.4 * 100)
 counted **"AI-proficient"** if that score `≥ ai_proficiency_min_score` (**30**). This single
 threshold + the `^0.4` curve is used **consistently** for the Teams page, the manager
 direct-reports count, and the Overview trend chart (they were unified so they agree).
+
+**Proficiency levels (Overview "by region" chart):** four named, **cumulative** ("at least")
+bands on that same AI axis score — `professional ≥30` (same threshold as above), `specialist
+≥45`, `expert ≥55`, `champion ≥65` (`settings.ai_proficiency_levels`). Cumulative means a
+Champion also counts toward Professional/Specialist/Expert. Each level has a hardcoded
+coverage **goal** (`settings.ai_proficiency_level_goals`: 80/50/35/20%) shown as a dashed
+target line on the chart — edit these two config dicts to retune either the level cutoffs or
+the goals.
 
 ### 6.4 Tier (MONTHLY, percentile-ranked)
 
@@ -272,6 +281,18 @@ normalized with the same `^0.4` curve and compared to the `≥30` threshold; the
 **current, in-progress quarter is excluded** (the chart is "measured at quarter end") so the
 line doesn't dip on partial data. Target line drawn at 80%.
 
+**AI-proficiency by region (second Overview tab):** a stacked bar chart, one bar per
+proficiency level (Professional → Champion), each stacked by region (Asia / North America /
+Europe / Other). Bar height = % of the whole company at that level; the goal % is drawn as a
+dashed line above each bar. `_compute_ai_proficiency_by_region()` reuses the same warm
+`classify_{uid}` AI-score cache as the dept snapshot (no rescoring), maps each employee's
+`country_code` to a region via `core/geo.py`, and counts per level/region. Region membership
+comes from real, confirmed Fabric data (6,859 active employees; no invented "unmapped"
+catch-all — every country_code present resolves to Asia/NA/Europe/Other per an explicit
+mapping agreed with the product owner, including a few judgment calls: Turkey→Asia,
+Russia/RF→Europe, Switzerland(`SWZ`)→Europe, Australia/null/`OT`→Other). Cached as
+`ai_proficiency_by_region`, same 25h TTL / nightly-recompute pattern as the trend chart.
+
 **Teams (per-department):** for each department, % of members who are AI-proficient (`≥30`).
 The **trend** compares the current % against a **period-stable baseline** (`dept_ai_baseline`,
 refreshed ~every 30 days, never seeded from a degenerate/cold snapshot) so it shows an honest
@@ -299,10 +320,12 @@ never blocks on Fabric.
 
 - **Startup:** init all SQLite tables, test Fabric, then fire background jobs — prewarm skill
   (`classify_*`) and streak caches, grade any unscored courses, compute company stats /
-  retention / at-risk / quarterly AI trend / department snapshot, and refresh tier scores.
+  retention / at-risk / quarterly AI trend / department snapshot / AI-proficiency-by-region
+  snapshot, and refresh tier scores.
 - **Nightly at 03:00 UTC** (`_run_nightly_refresh`, after the upstream ETL): **[on the 1st]
   award last month's badges →** force-refresh tier scores (current month) → prewarm skill &
-  streak → recompute company stats/trend/dept snapshot → clear & rebuild per-manager caches.
+  streak → recompute company stats/trend/dept snapshot/region snapshot → clear & rebuild
+  per-manager caches.
 - **Typical TTLs:** most derived `gpt_cache` entries 24–25h; `user_tier_scores` 24h;
   `dept_ai_baseline` ~60 days; `course_vertical_scores` and app-owned tables persist.
 
@@ -326,15 +349,19 @@ costs LLM calls to rebuild) or the app-owned `user_badges` / `congrats`.
    loading/sign-in/error gating.
 4. Views: **MyProgress** (tier card + badges, streak, skill radar, continue/recommended),
    **MyTeam** (highlights, accomplishments with congrats, team recommendations),
-   **MgrOverview** (KPI cards + trend line chart), **MgrTeams** (per-dept proficiency bars),
-   **MgrPeople** (searchable people table).
+   **MgrOverview** (KPI cards + a chart card with two tabs — "Trend" line chart and "By
+   region" bar chart), **MgrTeams** (per-dept proficiency bars), **MgrPeople** (searchable
+   people table).
 5. `charts.jsx`: **RadarChart** (5-axis skill polygon; this-month solid, last-month dashed,
-   optional teammate compare) and **LineChart** (quarterly AI-proficient % filled line + %
-   active dashed line + 80% target). Ribbons/tier visuals in `icons.jsx`.
+   optional teammate compare), **LineChart** (quarterly AI-proficient % filled line + %
+   active dashed line + 80% target), and **RegionProficiencyChart** (stacked bar per
+   proficiency level, segmented by region, with a dashed per-level goal line and a hover
+   tooltip showing that region's own proficiency rate). Ribbons/tier visuals in `icons.jsx`.
 
 The frontend mapping is where raw fields become display fields — e.g. `tier.progress →
 E.tierProgress`, `skills.this_month → radar`, `monthly_trend → months + series`,
-`departments[].ai_proficient_pct → team.prof`, badge rows → grouped tier columns.
+`proficiency_by_region → NOVA.manager.proficiencyByRegion` (via `mapProficiencyByRegion` in
+`api.js`), `departments[].ai_proficient_pct → team.prof`, badge rows → grouped tier columns.
 
 ---
 
@@ -344,6 +371,9 @@ E.tierProgress`, `skills.this_month → radar`, `monthly_trend → months + seri
 |---|---|
 | Skill normalization | `min(100, (raw/5000)^0.4 * 100)` |
 | AI-proficient threshold | score ≥ **30** |
+| Proficiency levels (cumulative) | professional ≥30 / specialist ≥45 / expert ≥55 / champion ≥65 |
+| Proficiency level goals | professional 80% / specialist 50% / expert 35% / champion 20% |
+| Region mapping | `core/geo.py` — Asia/NA/Europe/Other from `country_code` |
 | Tier weights | credits .30 / skill .35 / consistency .20 / recency .15 |
 | Monthly credit target | **100** credits → credits_score 100 |
 | Tier percentile cutoffs | platinum 3 / diamond 10 / gold 20 / silver 40 / bronze 60 |

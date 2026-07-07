@@ -108,93 +108,94 @@ function LineChart({months, proficiency, active, target, total}){
 }
 
 /* ---------- Manager region proficiency bar chart ---------- */
-/* Stacked bar per AI-proficiency level (Professional→Champion). Bar height =
-   % of company at that level (cumulative "at least" threshold), stacked by
-   region. Dashed line above each bar = the coverage goal for that level.
-   Hover a region segment → what share of that region's own employees are at
-   the level. All numbers come straight from the backend payload. */
+/* Grouped bars per AI-proficiency level (Professional→Champion): one bar per
+   region, height = that region's OWN % proficient at the level (independent
+   of headcount, so a small region isn't visually crushed by a big one). A
+   dashed line marks the company-wide goal for the level; a solid grey tick
+   marks the company-wide actual %. Hover a bar → exact counts. All numbers
+   come straight from the backend payload. */
 function RegionProficiencyChart({data}){
   const [hover,setHover]=_useState(null);   // {li, rkey}
   if(!data || !data.levels || !data.levels.length){
     return h('div',{style:{padding:'48px 0',textAlign:'center',color:'var(--muted)',
       fontSize:14,fontWeight:600}}, 'Computing region breakdown…');
   }
-  const {levels, regions, total} = data;
+  const {levels, regions} = data;
   const fmt = n => Math.round(n).toLocaleString();
+  const nReg = regions.length;
 
-  const W=820, H=360, padL=44, padR=20, padT=30, padB=64;
+  const W=820, H=380, padL=44, padR=20, padT=30, padB=70;
   const plotH=H-padT-padB;
   const colW=(W-padL-padR)/levels.length;
-  const barW=Math.min(96, colW*0.5);
+  const groupW=colW*0.74;
+  const barGap=6;
+  const barW=Math.max(14,(groupW-(nReg-1)*barGap)/nReg);
   const cx = i => padL + colW*i + colW/2;
-  const iy = v => padT + (100-v)/100*plotH;   // v in 0..100 (% of company)
+  const groupLeft = i => cx(i)-groupW/2;
+  const iy = v => padT + (100-v)/100*plotH;   // v in 0..100 (% of that region's own employees)
   const yticks=[0,25,50,75,100];
 
   const regionByKey = Object.fromEntries(regions.map(r=>[r.key,r]));
 
   return h('div',{style:{position:'relative'}},
     h('svg',{viewBox:`0 0 ${W} ${H}`, width:'100%', onMouseLeave:()=>setHover(null)},
-      // y grid + labels (top line = total workforce, 100%)
+      // y grid + labels
       yticks.map(t=>h('g',{key:'y'+t},
-        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t),
-          stroke: t===100?'#a7abc0':'#eeedf5', strokeWidth: t===100?1.6:1}),
+        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t), stroke:'#eeedf5', strokeWidth:1}),
         h('text',{x:padL-10,y:iy(t)+4,textAnchor:'end',fontSize:11.5,fontWeight:600,fill:'#9a9db4'}, t+'%')
       )),
-      // per-level columns
+      // per-level groups
       levels.map((lv,li)=>{
-        const x0 = cx(li)-barW/2;
-        // stacked region segments, bottom-anchored
-        let cum=0;   // accumulated % of company from below
-        const segs = regions.map(r=>{
+        const gl=groupLeft(li);
+        const bars=regions.map((r,ri)=>{
           const seg=lv.regions[r.key]||{};
-          const segPct=seg.pct_of_company||0;
-          if(segPct<=0){return null;}
-          const yTop=iy(cum+segPct);
-          const yBot=iy(cum);
+          const pct=seg.pct_of_region||0;
+          const x=gl+ri*(barW+barGap);
+          const yTop=iy(pct), yBot=iy(0);
           const isActive=hover && hover.li===li && hover.rkey===r.key;
-          const rect=h('rect',{key:'s'+r.key,
-            x:x0, y:yTop, width:barW, height:Math.max(0,yBot-yTop),
-            fill:r.color, opacity:isActive?1:0.86,
-            stroke:isActive?'#fff':'rgba(255,255,255,.22)', strokeWidth:isActive?2:1,
-            style:{cursor:'pointer',transition:'opacity .15s'},
-            onMouseEnter:()=>setHover({li,rkey:r.key})});
-          cum+=segPct;
-          return rect;
-        }).filter(Boolean);
+          return h('g',{key:'b'+r.key},
+            h('rect',{x, y:yTop, width:barW, height:Math.max(0,yBot-yTop),
+              fill:r.color, opacity:isActive?1:0.88,
+              stroke:isActive?'#fff':'rgba(255,255,255,.22)', strokeWidth:isActive?2:1,
+              style:{cursor:'pointer',transition:'opacity .15s'},
+              onMouseEnter:()=>setHover({li,rkey:r.key})}),
+            pct>0 && h('text',{x:x+barW/2, y:yTop-5, textAnchor:'middle',
+              fontSize:9.5,fontWeight:800,fill:r.color}, Math.round(pct)+'%')
+          );
+        });
 
-        // value label above bar (total % of company at this level)
-        const topY=iy(lv.totalPct);
-        const label=h('text',{key:'vl',x:cx(li),y:topY-9,textAnchor:'middle',
-          fontSize:13,fontWeight:800,fill:'#181a2e'},
-          lv.totalPct+'%',
-          h('tspan',{fill:'#7a7d96',fontWeight:600,fontSize:11}, ' · '+fmt(lv.totalCount)));
+        // company-wide actual — solid grey tick across the group
+        const cy=iy(lv.totalPct);
+        const companyTick=h('g',{key:'co'},
+          h('line',{x1:gl-4,y1:cy,x2:gl+groupW+4,y2:cy, stroke:'#7a7d96',strokeWidth:2}),
+          h('circle',{cx:gl-4,cy,r:2.5,fill:'#7a7d96'}),
+          h('circle',{cx:gl+groupW+4,cy,r:2.5,fill:'#7a7d96'}));
 
-        // goal dashed line + chip
+        // goal — dashed line above/below, spanning a bit wider than the group
         const gy=iy(lv.goalPct);
-        const gw=barW+40;
+        const gw=groupW+20;
         const goal=h('g',{key:'g'},
           h('line',{x1:cx(li)-gw/2,y1:gy,x2:cx(li)+gw/2,y2:gy,
-            stroke:'#3a3d57',strokeWidth:1.8,strokeDasharray:'5 4',opacity:.8}),
+            stroke:'#3a3d57',strokeWidth:1.8,strokeDasharray:'5 4',opacity:.85}),
           h('text',{x:cx(li)+gw/2,y:gy-5,textAnchor:'end',fontSize:10.5,fontWeight:800,
             fill:'#3a3d57'}, 'Goal '+lv.goalPct+'%'));
 
-        // x-axis level name + sub
+        // x-axis level name + company-wide summary
         const xlab=h('g',{key:'xl'},
           h('text',{x:cx(li),y:H-padB+22,textAnchor:'middle',fontSize:13.5,fontWeight:800,
             fill:'#181a2e'}, lv.name),
           h('text',{x:cx(li),y:H-padB+39,textAnchor:'middle',fontSize:11,fontWeight:600,
-            fill:'#9a9db4'}, lv.totalPct+'% of '+lv.goalPct+'% goal'));
+            fill:'#9a9db4'}, 'Company '+lv.totalPct+'% · '+fmt(lv.totalCount)));
 
-        return h('g',{key:'col'+li}, segs, label, goal, xlab);
+        return h('g',{key:'col'+li}, bars, companyTick, goal, xlab);
       })
     ),
     hover && (()=>{
       const lv=levels[hover.li];
       const r=regionByKey[hover.rkey];
       const seg=lv.regions[hover.rkey]||{};
-      // tooltip anchored at the top of that column
-      const lx=(cx(hover.li)/W)*100;
-      const ty=(iy(lv.totalPct)/H)*100;
+      const lx=((groupLeft(hover.li)+(r? regions.indexOf(r)*(barW+barGap):0)+barW/2)/W)*100;
+      const ty=(iy(seg.pct_of_region||0)/H)*100;
       return h('div',{className:'chart-tip',style:{left:lx+'%',top:ty+'%'}},
         h('div',{className:'t1'}, (r?r.label:hover.rkey)+' · '+lv.name),
         h('div',{className:'row'}, h('span',{className:'dot',style:{background:r?r.color:'#999'}}),

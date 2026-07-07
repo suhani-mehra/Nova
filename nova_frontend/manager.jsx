@@ -26,7 +26,7 @@ function MgrOverview(){
         h('span',{style:{width:13,height:13,borderRadius:3,background:r.color,display:'inline-block'}}),
         `${r.label} · ${r.total.toLocaleString()}`)),
       h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#3a3d57'}}),'Goal per level'),
-      h('div',{className:'it'}, h('span',{className:'sw',style:{background:'#a7abc0'}}),'Total workforce (100%)')),
+      h('div',{className:'it'}, h('span',{style:{width:16,height:2,background:'#7a7d96',display:'inline-block'}}),'Company-wide actual')),
   ];
 
   return h('div',{className:'page'},
@@ -47,7 +47,7 @@ function MgrOverview(){
           h('div',{className:'card-title'}, chartTab==='trend'?'AI Proficiency Trend':'AI Proficiency by Region'),
           h('div',{className:'card-sub'}, chartTab==='trend'
             ? '% of all employees with AI proficiency ≥ 30%, measured at each quarter end.'
-            : 'Share of the company reaching each proficiency level today, split by region, versus the goal.')),
+            : "Each region's own % proficient at each level, vs. the company-wide actual and goal.")),
         h('div',{className:'seg'},
           h('button',{className:chartTab==='trend'?'on':'', onClick:()=>setChartTab('trend')},'Trend'),
           h('button',{className:chartTab==='region'?'on':'', onClick:()=>setChartTab('region')},'By region'))),
