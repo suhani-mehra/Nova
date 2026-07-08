@@ -3,7 +3,7 @@ core/config.py
 Centralised settings loaded from .env via pydantic-settings.
 Usage anywhere in the app:
     from core.config import settings
-    print(settings.fabric_server)
+    print(settings.api_endpoint_url)
 """
 
 from functools import lru_cache
@@ -16,6 +16,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",   # tolerate stale/unknown keys in .env
     )
 
     # ── Azure AD ──────────────────────────────────────────────────────────────
@@ -45,15 +46,20 @@ class Settings(BaseSettings):
     azure_openai_endpoint: str                  # e.g. https://your-resource.openai.azure.com/
     openai_recommendation_cache_hours: int = 24
 
-    # ── Microsoft Fabric ──────────────────────────────────────────────────────
-    fabric_server: str
-    fabric_database: str
-    fabric_driver: str = "/opt/homebrew/lib/libmsodbcsql.18.dylib"
-    # fabric_auth_tenant_id: the tenant to use when obtaining a token for
-    # the Fabric SQL connection.  For B2B guest accounts this must be the
-    # user's HOME tenant, not the Orion (resource) tenant.
-    # Defaults to azure_tenant_id (works for native Orion accounts).
-    fabric_auth_tenant_id: str = ""
+    # ── Classmate table-dump API (replaces the old Fabric SQL connection) ─────
+    # POST {tableName, pageNumber, pageSize} → whole-table pages.
+    # Auth: APIM subscription key header + OAuth client-credentials Bearer token.
+    api_endpoint_url: str = ""
+    api_subscription_key: str = ""
+    api_tenant_id: str = ""
+    api_client_id: str = ""
+    api_client_secret: str = ""
+    api_scope: str = ""
+    api_page_size: int = 50000
+
+    # ── Local warehouse (synced copy of the API tables) ──────────────────────
+    # Relative paths resolve against nova_backend/ (the uvicorn cwd).
+    warehouse_db_path: str = "nova_warehouse.db"
 
     # ── Nova App ──────────────────────────────────────────────────────────────
     nova_env: str = "development"

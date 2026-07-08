@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .DS_Store
 nova.db
+nova_warehouse.db
+nova_warehouse.db.new
+nova_warehouse.db-wal
+nova_warehouse.db-shm

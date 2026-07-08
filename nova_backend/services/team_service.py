@@ -14,10 +14,13 @@ def get_team_highlights(manager_user_id: int, conn=None) -> dict:
     reports = query(
         """
         SELECT user_id, display_name
-        FROM   classmate.dim_classmate_employee_profile
-        WHERE  manager    = ?
-          AND  is_active  = 1
-          AND  is_deleted = 0
+        FROM   dim_classmate_employee_profile
+        WHERE  manager      = ?
+          AND  is_active    = 1
+          AND  is_deleted   = 0
+          AND  etl_isactive = 1
+          AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
+          AND  country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
         """,
         (manager_user_id,),
     )
@@ -36,10 +39,10 @@ def get_team_highlights(manager_user_id: int, conn=None) -> dict:
     this_month_rows = query(
         f"""
         SELECT user_id, SUM(value) AS credits
-        FROM   classmate.fact_classmate_learning_credit
+        FROM   fact_classmate_learning_credit
         WHERE  user_id IN ({placeholders})
           AND  is_deleted = 0
-          AND  credit_date >= DATEADD(day, -30, GETDATE())
+          AND  credit_date >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-30 days')
         GROUP BY user_id
         """,
         tuple(uids),
@@ -50,11 +53,11 @@ def get_team_highlights(manager_user_id: int, conn=None) -> dict:
     last_month_rows = query(
         f"""
         SELECT user_id, SUM(value) AS credits
-        FROM   classmate.fact_classmate_learning_credit
+        FROM   fact_classmate_learning_credit
         WHERE  user_id IN ({placeholders})
           AND  is_deleted = 0
-          AND  credit_date >= DATEADD(day, -60, GETDATE())
-          AND  credit_date <  DATEADD(day, -30, GETDATE())
+          AND  credit_date >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-60 days')
+          AND  credit_date <  strftime('%Y-%m-%dT%H:%M:%S', 'now', '-30 days')
         GROUP BY user_id
         """,
         tuple(uids),
@@ -109,44 +112,48 @@ def get_team_accomplishments(
         # Include both peer group and own direct reports
         rows = query(
             """
-            SELECT TOP 50
-                vt.user_id, vt.display_name AS employee_name,
+            SELECT vt.user_id, vt.display_name AS employee_name,
                 vt.course_name, vt.completed_on, vt.learning_credits
-            FROM   classmate.vw_classmate_trainings vt
+            FROM   vw_classmate_trainings vt
             WHERE  vt.status       = 4052
-              AND  vt.completed_on >= DATEADD(day, -?, GETDATE())
+              AND  vt.completed_on >= strftime('%Y-%m-%dT%H:%M:%S', 'now', printf('-%d days', ?))
               AND  vt.user_id     != ?
               AND  vt.user_id IN (
                   SELECT DISTINCT user_id
-                  FROM   classmate.dim_classmate_employee_profile
+                  FROM   dim_classmate_employee_profile
                   WHERE  manager IN (?, ?)
                     AND  is_active    = 1
                     AND  is_deleted   = 0
                     AND  etl_isactive = 1
+                    AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
+                    AND  country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
               )
             ORDER BY vt.completed_on DESC
-            """,
+        LIMIT 50
+        """,
             (days, own_user_id, manager_user_id, own_user_id),
         )
     else:
         rows = query(
             """
-            SELECT TOP 50
-                vt.user_id, vt.display_name AS employee_name,
+            SELECT vt.user_id, vt.display_name AS employee_name,
                 vt.course_name, vt.completed_on, vt.learning_credits
-            FROM   classmate.vw_classmate_trainings vt
+            FROM   vw_classmate_trainings vt
             WHERE  vt.status       = 4052
-              AND  vt.completed_on >= DATEADD(day, -?, GETDATE())
+              AND  vt.completed_on >= strftime('%Y-%m-%dT%H:%M:%S', 'now', printf('-%d days', ?))
               AND  vt.user_id IN (
                   SELECT DISTINCT user_id
-                  FROM   classmate.dim_classmate_employee_profile
+                  FROM   dim_classmate_employee_profile
                   WHERE  manager      = ?
                     AND  is_active    = 1
                     AND  is_deleted   = 0
                     AND  etl_isactive = 1
+                    AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
+                    AND  country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
               )
             ORDER BY vt.completed_on DESC
-            """,
+        LIMIT 50
+        """,
             (days, manager_user_id),
         )
     return [
@@ -165,19 +172,22 @@ def get_team_accomplishments(
 def get_team_course_popularity(manager_user_id: int, conn=None) -> list:
     rows = query(
         """
-        SELECT TOP 5 vt.course_name, COUNT(*) AS completion_count
-        FROM   classmate.vw_classmate_trainings vt
+        SELECT vt.course_name, COUNT(*) AS completion_count
+        FROM   vw_classmate_trainings vt
         WHERE  vt.status = 4052
           AND  vt.user_id IN (
               SELECT DISTINCT user_id
-              FROM   classmate.dim_classmate_employee_profile
+              FROM   dim_classmate_employee_profile
               WHERE  manager      = ?
                 AND  is_active    = 1
                 AND  is_deleted   = 0
                 AND  etl_isactive = 1
+                AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
+                AND  country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
           )
         GROUP BY vt.course_name
         ORDER BY completion_count DESC
+        LIMIT 5
         """,
         (manager_user_id,),
     )
@@ -195,10 +205,13 @@ def get_at_risk_employees(manager_user_id: int, conn=None) -> list:
     reports = query(
         """
         SELECT user_id, display_name
-        FROM   classmate.dim_classmate_employee_profile
-        WHERE  manager    = ?
-          AND  is_active  = 1
-          AND  is_deleted = 0
+        FROM   dim_classmate_employee_profile
+        WHERE  manager      = ?
+          AND  is_active    = 1
+          AND  is_deleted   = 0
+          AND  etl_isactive = 1
+          AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
+          AND  country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
         """,
         (manager_user_id,),
     )
@@ -213,7 +226,7 @@ def get_at_risk_employees(manager_user_id: int, conn=None) -> list:
     last_active_rows = query(
         f"""
         SELECT user_id, MAX(credit_date) AS last_date
-        FROM   classmate.fact_classmate_learning_credit
+        FROM   fact_classmate_learning_credit
         WHERE  user_id IN ({placeholders})
           AND  is_deleted = 0
         GROUP BY user_id
@@ -226,10 +239,10 @@ def get_at_risk_employees(manager_user_id: int, conn=None) -> list:
     quarter_rows = query(
         f"""
         SELECT user_id, SUM(learning_credits) AS credits
-        FROM   classmate.vw_classmate_trainings
+        FROM   vw_classmate_trainings
         WHERE  user_id IN ({placeholders})
           AND  status = 4052
-          AND  completed_on >= DATEADD(day, -90, GETDATE())
+          AND  completed_on >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-90 days')
         GROUP BY user_id
         """,
         tuple(uids),

@@ -89,8 +89,8 @@ def _compute_population_scores(target_month: date):
     # month-zero users simply rank near the bottom (intended monthly reset).
     pop_rows = query(
         """
-        SELECT user_id, ISNULL(SUM(learning_credits), 0) AS tc
-        FROM classmate.vw_classmate_trainings
+        SELECT user_id, COALESCE(SUM(learning_credits), 0) AS tc
+        FROM vw_classmate_trainings
         WHERE status = 4052
         GROUP BY user_id
         """
@@ -103,8 +103,8 @@ def _compute_population_scores(target_month: date):
     # Month-to-date completed credits (zero-filled for non-earners this month).
     mc_rows = query(
         """
-        SELECT user_id, ISNULL(SUM(learning_credits), 0) AS tc
-        FROM classmate.vw_classmate_trainings
+        SELECT user_id, COALESCE(SUM(learning_credits), 0) AS tc
+        FROM vw_classmate_trainings
         WHERE status = 4052 AND completed_on >= ? AND completed_on < ?
         GROUP BY user_id
         """,
@@ -115,8 +115,8 @@ def _compute_population_scores(target_month: date):
     # Month-to-date recency credits + monthly company average.
     recency_rows = query(
         """
-        SELECT user_id, ISNULL(SUM(value), 0) AS credits_m
-        FROM classmate.fact_classmate_learning_credit
+        SELECT user_id, COALESCE(SUM(value), 0) AS credits_m
+        FROM fact_classmate_learning_credit
         WHERE is_deleted = 0 AND credit_date >= ? AND credit_date < ?
         GROUP BY user_id
         """,
@@ -131,20 +131,20 @@ def _compute_population_scores(target_month: date):
     # Month-to-date distinct active days.
     consistency_rows = query(
         """
-        SELECT user_id, COUNT(DISTINCT CAST(activity_date AS DATE)) AS active_days
+        SELECT user_id, COUNT(DISTINCT date(activity_date)) AS active_days
         FROM (
             SELECT user_id, credit_date AS activity_date
-            FROM classmate.fact_classmate_learning_credit
+            FROM fact_classmate_learning_credit
             WHERE is_deleted = 0 AND duration > 0
               AND credit_date >= ? AND credit_date < ?
             UNION
-            SELECT user_id, CAST(modified_on AS DATE)
-            FROM classmate.fact_classmate_user_skill_status
+            SELECT user_id, date(modified_on)
+            FROM fact_classmate_user_skill_status
             WHERE is_deleted = 0 AND is_active = 1
               AND modified_on >= ? AND modified_on < ?
             UNION
             SELECT user_id, attended_date
-            FROM classmate.fact_classmate_self_study
+            FROM fact_classmate_self_study
             WHERE status = 2 AND is_deleted = 0
               AND attended_date >= ? AND attended_date < ?
         ) src

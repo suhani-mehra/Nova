@@ -87,7 +87,7 @@ def calculate_skill_radar(user_id: int, conn=None) -> dict:
     completed = query(
         """
         SELECT second_level_category_id, course_name, completed_on
-        FROM   classmate.vw_classmate_trainings
+        FROM   vw_classmate_trainings
         WHERE  user_id = ?
           AND  status  = 4052
         ORDER BY completed_on DESC
@@ -99,8 +99,8 @@ def calculate_skill_radar(user_id: int, conn=None) -> dict:
         SELECT fc.certificate_id,
                dc.certificate_name AS course_name,
                fc.completion_date  AS completed_on
-        FROM   classmate.fact_classmate_certification fc
-        JOIN   classmate.dim_classmate_certificate dc ON dc.id = fc.certificate_id
+        FROM   fact_classmate_certification fc
+        JOIN   dim_classmate_certificate dc ON dc.id = fc.certificate_id
         WHERE  fc.user_id   = ?
           AND  fc.status    = 2
           AND  fc.is_active = 1
@@ -118,7 +118,7 @@ def calculate_skill_radar(user_id: int, conn=None) -> dict:
                COALESCE(self_study_id, session_id, recorded_training_id) AS item_id,
                topic AS course_name,
                credit_date AS completed_on
-        FROM   classmate.fact_classmate_learning_credit
+        FROM   fact_classmate_learning_credit
         WHERE  user_id    = ?
           AND  is_deleted = 0
           AND  COALESCE(self_study_id, session_id, recorded_training_id) IS NOT NULL
@@ -247,7 +247,7 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
             course_rows = query(
                 f"""
                 SELECT user_id, second_level_category_id, course_name, completed_on
-                FROM classmate.vw_classmate_trainings
+                FROM vw_classmate_trainings
                 WHERE user_id IN ({ph}) AND status = 4052
                 """,
                 tuple(uncached_uids),
@@ -263,8 +263,8 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
                        fc.certificate_id,
                        dc.certificate_name AS course_name,
                        fc.completion_date  AS completed_on
-                FROM classmate.fact_classmate_certification fc
-                JOIN classmate.dim_classmate_certificate dc ON dc.id = fc.certificate_id
+                FROM fact_classmate_certification fc
+                JOIN dim_classmate_certificate dc ON dc.id = fc.certificate_id
                 WHERE fc.user_id IN ({ph}) AND fc.status = 2
                   AND fc.is_active = 1 AND fc.is_deleted = 0
                 """,
@@ -285,7 +285,7 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
                        COALESCE(self_study_id, session_id, recorded_training_id) AS item_id,
                        topic AS course_name,
                        credit_date AS completed_on
-                FROM classmate.fact_classmate_learning_credit
+                FROM fact_classmate_learning_credit
                 WHERE user_id IN ({ph}) AND is_deleted=0
                   AND COALESCE(self_study_id, session_id, recorded_training_id) IS NOT NULL
                 """,
@@ -452,10 +452,13 @@ def get_team_ai_proficiency(manager_user_id: int, conn=None) -> dict:
     reports = query(
         """
         SELECT DISTINCT user_id
-        FROM   classmate.dim_classmate_employee_profile
-        WHERE  manager    = ?
-          AND  is_active  = 1
-          AND  is_deleted = 0
+        FROM   dim_classmate_employee_profile
+        WHERE  manager      = ?
+          AND  is_active    = 1
+          AND  is_deleted   = 0
+          AND  etl_isactive = 1
+          AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
+          AND  country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
         """,
         (manager_user_id,),
     )

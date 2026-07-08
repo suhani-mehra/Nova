@@ -100,11 +100,12 @@ def _get_direct_report_ids(manager_id: int) -> list:
     rows = query(
         """
         SELECT DISTINCT user_id
-        FROM   classmate.dim_classmate_employee_profile
+        FROM   dim_classmate_employee_profile
         WHERE  manager      = ?
           AND  is_active    = 1
           AND  is_deleted   = 0
           AND  etl_isactive = 1
+          AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
         """,
         (manager_id,),
     )
@@ -195,17 +196,18 @@ def _get_team_completions_delta(manager_id: int, uid: int) -> float:
     rows = query(
         """
         SELECT
-            SUM(CASE WHEN completed_on >= DATEADD(day,-7,GETDATE()) THEN 1 ELSE 0 END) AS this_week,
-            SUM(CASE WHEN completed_on >= DATEADD(day,-14,GETDATE())
-                      AND completed_on <  DATEADD(day,-7,GETDATE())  THEN 1 ELSE 0 END) AS last_week
-        FROM classmate.vw_classmate_trainings
+            SUM(CASE WHEN completed_on >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-7 days') THEN 1 ELSE 0 END) AS this_week,
+            SUM(CASE WHEN completed_on >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-14 days')
+                      AND completed_on <  strftime('%Y-%m-%dT%H:%M:%S', 'now', '-7 days')  THEN 1 ELSE 0 END) AS last_week
+        FROM vw_classmate_trainings
         WHERE status = 4052
           AND user_id IN (
               SELECT DISTINCT user_id
-              FROM   classmate.dim_classmate_employee_profile
+              FROM   dim_classmate_employee_profile
               WHERE  manager IN (?,?) AND is_active=1 AND is_deleted=0 AND etl_isactive=1
+                AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
           )
-          AND completed_on >= DATEADD(day,-14,GETDATE())
+          AND completed_on >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-14 days')
         """,
         (manager_id, uid),
     )
@@ -223,16 +225,18 @@ def _get_team_top_courses(manager_id: int, uid: int) -> list:
     from services.skill_service import _classify
     rows = query(
         """
-        SELECT TOP 20 vt.course_name, COUNT(*) AS completion_count
-        FROM   classmate.vw_classmate_trainings vt
+        SELECT vt.course_name, COUNT(*) AS completion_count
+        FROM   vw_classmate_trainings vt
         WHERE  vt.status = 4052
           AND  vt.user_id IN (
               SELECT DISTINCT user_id
-              FROM   classmate.dim_classmate_employee_profile
+              FROM   dim_classmate_employee_profile
               WHERE  manager IN (?,?) AND is_active=1 AND is_deleted=0 AND etl_isactive=1
+                AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
           )
         GROUP BY vt.course_name
         ORDER BY completion_count DESC
+        LIMIT 20
         """,
         (manager_id, uid),
     )
@@ -251,21 +255,23 @@ def _get_team_reco_courses(manager_id: int, uid: int) -> list:
     from services.skill_service import _classify
     rows = query(
         """
-        SELECT TOP 20 vt.course_name, COUNT(*) AS completion_count
-        FROM   classmate.vw_classmate_trainings vt
+        SELECT vt.course_name, COUNT(*) AS completion_count
+        FROM   vw_classmate_trainings vt
         WHERE  vt.status = 4052
           AND  vt.user_id IN (
               SELECT DISTINCT user_id
-              FROM   classmate.dim_classmate_employee_profile
+              FROM   dim_classmate_employee_profile
               WHERE  manager IN (?,?) AND is_active=1 AND is_deleted=0 AND etl_isactive=1
+                AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
           )
           AND  vt.course_name NOT IN (
               SELECT DISTINCT course_name
-              FROM   classmate.vw_classmate_trainings
+              FROM   vw_classmate_trainings
               WHERE  user_id=? AND status=4052
           )
         GROUP BY vt.course_name
         ORDER BY completion_count DESC
+        LIMIT 20
         """,
         (manager_id, uid, uid),
     )
@@ -286,12 +292,12 @@ def _get_fallback_reco_courses(uid: int) -> list:
     rows = query(
         """
         SELECT DISTINCT sc.id, sc.name
-        FROM classmate.dim_classmate_second_level_category sc
-        JOIN classmate.dim_classmate_content_mapping cm
+        FROM dim_classmate_second_level_category sc
+        JOIN dim_classmate_content_mapping cm
           ON cm.second_level_category_id = sc.id AND cm.is_deleted = 0
         WHERE sc.etl_isactive=1 AND sc.is_active=1 AND sc.is_deleted=0 AND sc.is_private=0
           AND sc.id NOT IN (
-              SELECT second_level_category_id FROM classmate.vw_classmate_trainings
+              SELECT second_level_category_id FROM vw_classmate_trainings
               WHERE user_id=? AND status=4052
           )
         """,
@@ -301,7 +307,7 @@ def _get_fallback_reco_courses(uid: int) -> list:
                  if r["name"] and not _is_training_module_by_name(r["name"])]
     # Bias toward categories the user has completed / is currently studying.
     hist = query(
-        "SELECT DISTINCT course_name FROM classmate.vw_classmate_trainings "
+        "SELECT DISTINCT course_name FROM vw_classmate_trainings "
         "WHERE user_id=? AND status IN (4052,4035)",
         (uid,),
     )
@@ -323,11 +329,12 @@ def _get_fallback_reco_courses(uid: int) -> list:
 def _get_inprogress(user_id: int) -> dict | None:
     rows = query(
         """
-        SELECT TOP 1 id, course_name
-        FROM   classmate.vw_classmate_trainings
+        SELECT id, course_name
+        FROM   vw_classmate_trainings
         WHERE  user_id = ?
           AND  status  = 4035
         ORDER BY start_date DESC
+        LIMIT 1
         """,
         (user_id,),
     )
@@ -346,10 +353,11 @@ def _get_manager_id(user_id: int) -> int | None:
                      PARTITION BY user_id
                      ORDER BY modified_on DESC
                    ) AS rn
-            FROM classmate.dim_classmate_employee_profile
+            FROM dim_classmate_employee_profile
             WHERE etl_isactive = 1
               AND is_active    = 1
               AND is_deleted   = 0
+              AND (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
         )
         SELECT manager
         FROM   latest_profiles
@@ -378,7 +386,7 @@ async def employee_dashboard(user: CurrentUser = Depends(get_current_user)):
             _run(get_recommendation, uid),
         )
     except Exception as exc:
-        logger.warning("Fabric unavailable for dashboard uid=%s: %s", uid, exc)
+        logger.warning("Warehouse unavailable for dashboard uid=%s: %s", uid, exc)
         raise HTTPException(status_code=503, detail="Data unavailable")
 
     return {
@@ -430,7 +438,7 @@ async def employee_team(user: CurrentUser = Depends(get_current_user)):
             _run(_get_team_congrats_week, manager_id),
         )
     except Exception as exc:
-        logger.warning("Fabric unavailable for team uid=%s: %s", uid, exc)
+        logger.warning("Warehouse unavailable for team uid=%s: %s", uid, exc)
         raise HTTPException(status_code=503, detail="Data unavailable")
 
     # Most completed non-training course for the highlights banner
@@ -499,8 +507,9 @@ async def employee_compare(target_user_id: int, user: CurrentUser = Depends(get_
             WITH lp AS (
                 SELECT display_name, user_id,
                        ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY modified_on DESC) AS rn
-                FROM classmate.dim_classmate_employee_profile
+                FROM dim_classmate_employee_profile
                 WHERE etl_isactive = 1 AND is_active = 1 AND is_deleted = 0
+                  AND (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
             )
             SELECT display_name FROM lp WHERE rn = 1 AND user_id = ?
             """,

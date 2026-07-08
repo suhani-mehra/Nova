@@ -149,29 +149,29 @@ def _prewarm_streak_cache(chunk_size: int = 500):
         try:
             activity_rows = _query(
                 f"""
-                SELECT DISTINCT user_id, CAST(activity_date AS DATE) AS activity_date
+                SELECT DISTINCT user_id, date(activity_date) AS activity_date
                 FROM (
                     SELECT user_id, credit_date AS activity_date
-                    FROM classmate.fact_classmate_learning_credit
+                    FROM fact_classmate_learning_credit
                     WHERE user_id IN ({ph}) AND is_deleted=0 AND duration>0
                     UNION
-                    SELECT user_id, CAST(modified_on AS DATE)
-                    FROM classmate.fact_classmate_user_skill_status
+                    SELECT user_id, date(modified_on)
+                    FROM fact_classmate_user_skill_status
                     WHERE user_id IN ({ph}) AND is_deleted=0 AND is_active=1
                     UNION
                     SELECT user_id, attended_date
-                    FROM classmate.fact_classmate_self_study
+                    FROM fact_classmate_self_study
                     WHERE user_id IN ({ph}) AND status=2 AND is_deleted=0
                 ) src
                 WHERE activity_date IS NOT NULL
-                  AND activity_date >= CAST(DATEADD(day,-365,GETDATE()) AS DATE)
+                  AND activity_date >= date('now', '-365 days')
                 """,
                 tuple(chunk) * 3,
             )
             week_rows = _query(
                 f"""
                 SELECT user_id, SUM(duration) AS total_dur
-                FROM classmate.fact_classmate_learning_credit
+                FROM fact_classmate_learning_credit
                 WHERE user_id IN ({ph}) AND is_deleted=0 AND duration>0
                   AND credit_date >= ? AND credit_date <= ?
                 GROUP BY user_id
@@ -231,8 +231,11 @@ def _prewarm_manager_people_cache(chunk_size: int = 20):
     """
     mgr_rows = _query("""
         SELECT DISTINCT manager AS mgr_id
-        FROM classmate.dim_classmate_employee_profile
-        WHERE is_deleted = 0 AND manager IS NOT NULL
+        FROM dim_classmate_employee_profile
+        WHERE etl_isactive = 1 AND is_active = 1 AND is_deleted = 0
+          AND manager IS NOT NULL
+          AND (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
+          AND country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
     """)
     if not mgr_rows:
         logger.info("manager people pre-warm: no managers found")
@@ -341,8 +344,10 @@ def _require_manager(user: CurrentUser):
 def _get_company_headcount() -> int:
     rows = _query("""
         SELECT COUNT(DISTINCT user_id) AS n
-        FROM classmate.dim_classmate_employee_profile
+        FROM dim_classmate_employee_profile
         WHERE etl_isactive=1 AND is_active=1 AND is_deleted=0 AND user_id IS NOT NULL
+          AND (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
+          AND country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
     """)
     return int(rows[0]["n"] or 0) if rows else 0
 
@@ -363,25 +368,27 @@ def _get_company_active_this_week() -> int:
         SELECT COUNT(DISTINCT src.user_id) AS n
         FROM (
             SELECT user_id
-            FROM classmate.fact_classmate_learning_credit
+            FROM fact_classmate_learning_credit
             WHERE is_deleted = 0 AND duration > 0
               AND credit_date >= ? AND credit_date <= ?
             UNION
             SELECT user_id
-            FROM classmate.fact_classmate_user_skill_status
+            FROM fact_classmate_user_skill_status
             WHERE is_deleted = 0 AND is_active = 1
-              AND CAST(modified_on AS DATE) >= ? AND CAST(modified_on AS DATE) <= ?
+              AND date(modified_on) >= ? AND date(modified_on) <= ?
             UNION
             SELECT user_id
-            FROM classmate.fact_classmate_self_study
+            FROM fact_classmate_self_study
             WHERE status = 2 AND is_deleted = 0
               AND attended_date >= ? AND attended_date <= ?
         ) src
         WHERE src.user_id IN (
             SELECT DISTINCT user_id
-            FROM classmate.dim_classmate_employee_profile
+            FROM dim_classmate_employee_profile
             WHERE etl_isactive = 1 AND is_active = 1 AND is_deleted = 0
               AND user_id IS NOT NULL
+              AND (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
+              AND country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
         )
         """,
         (monday, sunday, monday, sunday, monday, sunday),
@@ -405,17 +412,17 @@ def _get_team_active_this_week(uids: list) -> int:
         SELECT COUNT(DISTINCT src.user_id) AS n
         FROM (
             SELECT user_id
-            FROM classmate.fact_classmate_learning_credit
+            FROM fact_classmate_learning_credit
             WHERE is_deleted = 0 AND duration > 0
               AND credit_date >= ? AND credit_date <= ?
             UNION
             SELECT user_id
-            FROM classmate.fact_classmate_user_skill_status
+            FROM fact_classmate_user_skill_status
             WHERE is_deleted = 0 AND is_active = 1
-              AND CAST(modified_on AS DATE) >= ? AND CAST(modified_on AS DATE) <= ?
+              AND date(modified_on) >= ? AND date(modified_on) <= ?
             UNION
             SELECT user_id
-            FROM classmate.fact_classmate_self_study
+            FROM fact_classmate_self_study
             WHERE status = 2 AND is_deleted = 0
               AND attended_date >= ? AND attended_date <= ?
         ) src
@@ -439,7 +446,7 @@ def _get_team_courses_completed_this_week(uids: list) -> int:
     rows = _query(
         f"""
         SELECT COUNT(*) AS n
-        FROM classmate.vw_classmate_trainings
+        FROM vw_classmate_trainings
         WHERE status = 4052
           AND completed_on >= ? AND completed_on <= ?
           AND user_id IN ({ph})
@@ -453,12 +460,14 @@ def _get_company_avg_credits_this_quarter() -> float:
     rows = _query("""
         SELECT AVG(s.credits) AS avg_c FROM (
             SELECT user_id, SUM(learning_credits) AS credits
-            FROM classmate.vw_classmate_trainings
-            WHERE status=4052 AND completed_on >= DATEADD(day,-90,GETDATE())
+            FROM vw_classmate_trainings
+            WHERE status=4052 AND completed_on >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-90 days')
               AND user_id IN (
                   SELECT DISTINCT user_id
-                  FROM classmate.dim_classmate_employee_profile
+                  FROM dim_classmate_employee_profile
                   WHERE etl_isactive=1 AND is_active=1 AND is_deleted=0 AND user_id IS NOT NULL
+                    AND (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
+                    AND country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
               )
             GROUP BY user_id
         ) s
@@ -531,8 +540,10 @@ def _compute_company_retention() -> dict:
     try:
         emp_rows = _query("""
             SELECT DISTINCT user_id
-            FROM classmate.dim_classmate_employee_profile
+            FROM dim_classmate_employee_profile
             WHERE etl_isactive=1 AND is_active=1 AND is_deleted=0 AND user_id IS NOT NULL
+              AND (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
+              AND country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
         """)
         all_uids = {r["user_id"] for r in emp_rows if r["user_id"]}
         headcount = len(all_uids)
@@ -540,15 +551,15 @@ def _compute_company_retention() -> dict:
         rows = _query("""
             SELECT DISTINCT user_id,
                 CASE
-                    WHEN credit_date >= DATEADD(day,-30,GETDATE())
+                    WHEN credit_date >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-30 days')
                     THEN 'cur'
-                    WHEN credit_date >= DATEADD(day,-60,GETDATE())
-                         AND credit_date < DATEADD(day,-30,GETDATE())
+                    WHEN credit_date >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-60 days')
+                         AND credit_date < strftime('%Y-%m-%dT%H:%M:%S', 'now', '-30 days')
                     THEN 'prev'
                 END AS window
-            FROM classmate.fact_classmate_learning_credit
+            FROM fact_classmate_learning_credit
             WHERE is_deleted=0
-              AND credit_date >= DATEADD(day,-60,GETDATE())
+              AND credit_date >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-60 days')
               AND user_id IS NOT NULL
         """)
         cur: set = set()
@@ -658,8 +669,10 @@ def _compute_quarterly_ai_proficiency() -> list:
 
     emp_rows = _query("""
         SELECT DISTINCT user_id
-        FROM classmate.dim_classmate_employee_profile
+        FROM dim_classmate_employee_profile
         WHERE etl_isactive=1 AND is_active=1 AND is_deleted=0 AND user_id IS NOT NULL
+          AND (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
+          AND country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
     """)
     all_uids = {r["user_id"] for r in emp_rows if r["user_id"]}
     total = len(all_uids)
@@ -671,7 +684,7 @@ def _compute_quarterly_ai_proficiency() -> list:
         training_rows = _query("""
             SELECT user_id, second_level_category_id AS item_id,
                    completed_on
-            FROM classmate.vw_classmate_trainings
+            FROM vw_classmate_trainings
             WHERE status=4052 AND user_id IS NOT NULL
               AND second_level_category_id IS NOT NULL AND completed_on IS NOT NULL
         """)
@@ -683,7 +696,7 @@ def _compute_quarterly_ai_proficiency() -> list:
         cert_rows = _query("""
             SELECT fc.user_id, fc.certificate_id AS item_id,
                    fc.completion_date AS completed_on
-            FROM classmate.fact_classmate_certification fc
+            FROM fact_classmate_certification fc
             WHERE fc.status=2 AND fc.is_active=1 AND fc.is_deleted=0
               AND fc.user_id IS NOT NULL AND fc.certificate_id IS NOT NULL
               AND fc.completion_date IS NOT NULL
@@ -695,7 +708,7 @@ def _compute_quarterly_ai_proficiency() -> list:
     try:
         lc_rows = _query("""
             SELECT user_id, topic AS name, MIN(credit_date) AS completed_on
-            FROM classmate.fact_classmate_learning_credit
+            FROM fact_classmate_learning_credit
             WHERE is_deleted=0
               AND topic IS NOT NULL AND topic != ''
               AND (self_study_id IS NOT NULL
@@ -996,7 +1009,7 @@ def _compute_ai_proficiency_by_region() -> dict:
     Returns:
         {
           "total": <company headcount>,
-          "region_totals": {"asia": n, "na": n, "eu": n, "other": n},
+          "region_totals": {"asia": n, "na": n, "eu": n},
           "levels": [
             {"key","name","threshold","goal_pct","total_count","total_pct",
              "regions": {"asia":{"count","pct_of_company","pct_of_region"}, ...}},
@@ -1034,7 +1047,12 @@ def _compute_ai_proficiency_by_region() -> dict:
     all_uid_list: list = []
     for r in emp_rows:
         uid = r["user_id"]
-        uid_region[uid] = continent_for(r.get("country_code"))
+        reg = continent_for(r.get("country_code"))
+        # None (NULL / unmapped country_code — placeholder rows) is not a
+        # rendered region; drop those employees from the chart entirely.
+        if reg not in REGION_ORDER:
+            continue
+        uid_region[uid] = reg
         all_uid_list.append(uid)
 
     # Read AI scores from gpt_cache first, then batch-compute the uncached —
@@ -1156,10 +1174,10 @@ def _avg_credits_this_quarter(uids: list) -> float:
         SELECT AVG(s.credits) AS avg_c
         FROM (
             SELECT user_id, SUM(learning_credits) AS credits
-            FROM   classmate.vw_classmate_trainings
+            FROM   vw_classmate_trainings
             WHERE  user_id IN ({placeholders})
               AND  status = 4052
-              AND  completed_on >= DATEADD(day, -90, GETDATE())
+              AND  completed_on >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-90 days')
             GROUP BY user_id
         ) s
         """,
@@ -1263,10 +1281,10 @@ def _enrich_search_results(uids: list, rows: list) -> list:
     try:
         cr = _query(
             f"""SELECT user_id, SUM(learning_credits) AS credits
-                FROM classmate.vw_classmate_trainings
+                FROM vw_classmate_trainings
                 WHERE user_id IN ({ph})
                   AND status=4052
-                  AND completed_on >= DATEADD(day,-90,GETDATE())
+                  AND completed_on >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-90 days')
                 GROUP BY user_id""",
             tuple(uids),
         )
@@ -1278,7 +1296,7 @@ def _enrich_search_results(uids: list, rows: list) -> list:
     try:
         lr = _query(
             f"""SELECT user_id, MAX(credit_date) AS last
-                FROM classmate.fact_classmate_learning_credit
+                FROM fact_classmate_learning_credit
                 WHERE user_id IN ({ph}) AND is_deleted=0
                 GROUP BY user_id""",
             tuple(uids),
@@ -1424,7 +1442,7 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
         )
 
     except Exception as exc:
-        logger.warning("Fabric unavailable for manager overview uid=%s: %s", mgr_id, exc)
+        logger.warning("Warehouse unavailable for manager overview uid=%s: %s", mgr_id, exc)
         raise HTTPException(status_code=503, detail="Data unavailable")
 
     return {
@@ -1511,10 +1529,10 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
     credit_rows = _query(
         f"""
         SELECT user_id, SUM(learning_credits) AS credits
-        FROM   classmate.vw_classmate_trainings
+        FROM   vw_classmate_trainings
         WHERE  user_id IN ({placeholders})
           AND  status = 4052
-          AND  completed_on >= DATEADD(day, -90, GETDATE())
+          AND  completed_on >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-90 days')
         GROUP BY user_id
         """,
         tuple(uids),
@@ -1526,7 +1544,7 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
         last_rows = _query(
             f"""
             SELECT user_id, MAX(credit_date) AS last_date
-            FROM   classmate.fact_classmate_learning_credit
+            FROM   fact_classmate_learning_credit
             WHERE  user_id IN ({placeholders})
               AND  is_deleted = 0
             GROUP BY user_id
@@ -1677,7 +1695,7 @@ async def manager_your_team(
                                      "by_tier": {"platinum": 0, "diamond": 0, "gold": 0,
                                                  "silver": 0, "bronze": 0}}})
     except Exception as exc:
-        logger.warning("Fabric unavailable for your-team uid=%s: %s", mgr_id, exc)
+        logger.warning("Warehouse unavailable for your-team uid=%s: %s", mgr_id, exc)
         raise HTTPException(status_code=503, detail="Data unavailable")
 
     return {

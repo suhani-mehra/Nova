@@ -125,8 +125,8 @@ def _batch_tier_inputs(uids: list[int], target_month: date | None = None) -> tup
     ph = ",".join("?" * len(uids))
     try:
         rows = query(
-            f"SELECT user_id, ISNULL(SUM(learning_credits),0) AS tc "
-            f"FROM classmate.vw_classmate_trainings "
+            f"SELECT user_id, COALESCE(SUM(learning_credits),0) AS tc "
+            f"FROM vw_classmate_trainings "
             f"WHERE user_id IN ({ph}) AND status=4052 "
             f"  AND completed_on >= ? AND completed_on < ? GROUP BY user_id",
             tuple(uids) + (start, end_excl),
@@ -136,8 +136,8 @@ def _batch_tier_inputs(uids: list[int], target_month: date | None = None) -> tup
         logger.warning("tier inputs: credits query failed: %s", exc)
     try:
         rows = query(
-            f"SELECT user_id, ISNULL(SUM(value),0) AS c30 "
-            f"FROM classmate.fact_classmate_learning_credit "
+            f"SELECT user_id, COALESCE(SUM(value),0) AS c30 "
+            f"FROM fact_classmate_learning_credit "
             f"WHERE user_id IN ({ph}) AND is_deleted=0 "
             f"  AND credit_date >= ? AND credit_date < ? GROUP BY user_id",
             tuple(uids) + (start, end_excl),
@@ -150,16 +150,16 @@ def _batch_tier_inputs(uids: list[int], target_month: date | None = None) -> tup
         rows = query(
             f"""SELECT user_id, COUNT(DISTINCT activity_date) AS ad90
             FROM (
-                SELECT user_id, CAST(credit_date AS DATE) AS activity_date
-                FROM classmate.fact_classmate_learning_credit
+                SELECT user_id, date(credit_date) AS activity_date
+                FROM fact_classmate_learning_credit
                 WHERE user_id IN ({ph}) AND is_deleted=0 AND duration>0
                 UNION
-                SELECT user_id, CAST(modified_on AS DATE)
-                FROM classmate.fact_classmate_user_skill_status
+                SELECT user_id, date(modified_on)
+                FROM fact_classmate_user_skill_status
                 WHERE user_id IN ({ph}) AND is_deleted=0 AND is_active=1
                 UNION
-                SELECT user_id, CAST(attended_date AS DATE)
-                FROM classmate.fact_classmate_self_study
+                SELECT user_id, date(attended_date)
+                FROM fact_classmate_self_study
                 WHERE user_id IN ({ph}) AND status=2 AND is_deleted=0
             ) src
             WHERE activity_date IS NOT NULL
@@ -367,7 +367,7 @@ def get_all_user_tiers() -> dict:
     all_credits_rows = query(
         """
         SELECT user_id, SUM(learning_credits) AS credits
-        FROM   classmate.vw_classmate_trainings
+        FROM   vw_classmate_trainings
         WHERE  status = 4052
         GROUP BY user_id
         """,

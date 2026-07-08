@@ -44,11 +44,12 @@ def get_recommendation(user_id: int, conn=None) -> dict:
     # Completed courses (recent 10)
     completed_rows = query(
         """
-        SELECT TOP 10 course_name
-        FROM   classmate.vw_classmate_trainings
+        SELECT course_name
+        FROM   vw_classmate_trainings
         WHERE  user_id = ?
           AND  status  = 4052
         ORDER BY completed_on DESC
+        LIMIT 10
         """,
         (user_id,),
     )
@@ -56,11 +57,12 @@ def get_recommendation(user_id: int, conn=None) -> dict:
 
     inprogress_rows = query(
         """
-        SELECT TOP 1 course_name
-        FROM   classmate.vw_classmate_trainings
+        SELECT course_name
+        FROM   vw_classmate_trainings
         WHERE  user_id = ?
           AND  status  = 4035
         ORDER BY start_date DESC
+        LIMIT 1
         """,
         (user_id,),
     )
@@ -77,7 +79,7 @@ def get_recommendation(user_id: int, conn=None) -> dict:
     # Manager for popular courses context
     manager_rows = query(
         """
-        SELECT manager FROM classmate.dim_classmate_employee_profile
+        SELECT manager FROM dim_classmate_employee_profile
         WHERE user_id = ? AND is_deleted = 0
         """,
         (user_id,),
@@ -88,15 +90,20 @@ def get_recommendation(user_id: int, conn=None) -> dict:
     if manager_id:
         pop_rows = query(
             """
-            SELECT TOP 5 vt.course_name, COUNT(*) AS cnt
-            FROM   classmate.vw_classmate_trainings vt
-            JOIN   classmate.dim_classmate_employee_profile ep ON ep.user_id = vt.user_id
-            WHERE  ep.manager    = ?
-              AND  ep.is_deleted = 0
-              AND  vt.status     = 4052
+            SELECT vt.course_name, COUNT(*) AS cnt
+            FROM   vw_classmate_trainings vt
+            JOIN   dim_classmate_employee_profile ep ON ep.user_id = vt.user_id
+            WHERE  ep.manager      = ?
+              AND  ep.is_active    = 1
+              AND  ep.is_deleted   = 0
+              AND  ep.etl_isactive = 1
+              AND  (ep.employee_id IS NULL OR UPPER(TRIM(ep.employee_id)) NOT LIKE 'TMP%')
+              AND  ep.country_code IS NOT NULL AND UPPER(TRIM(ep.country_code)) != 'OT'
+              AND  vt.status       = 4052
             GROUP BY vt.course_name
             ORDER BY cnt DESC
-            """,
+        LIMIT 5
+        """,
             (manager_id,),
         )
         popular_courses = [r["course_name"] for r in pop_rows]
@@ -105,8 +112,8 @@ def get_recommendation(user_id: int, conn=None) -> dict:
     catalogue_rows = query(
         """
         SELECT DISTINCT sc.id, sc.name
-        FROM classmate.dim_classmate_second_level_category sc
-        JOIN classmate.dim_classmate_content_mapping cm
+        FROM dim_classmate_second_level_category sc
+        JOIN dim_classmate_content_mapping cm
           ON cm.second_level_category_id = sc.id
          AND cm.is_deleted = 0
         WHERE sc.etl_isactive = 1
@@ -115,7 +122,7 @@ def get_recommendation(user_id: int, conn=None) -> dict:
           AND sc.is_private = 0
           AND sc.id NOT IN (
               SELECT second_level_category_id
-              FROM classmate.vw_classmate_trainings
+              FROM vw_classmate_trainings
               WHERE user_id=? AND status=4052
           )
         ORDER BY sc.name

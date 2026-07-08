@@ -18,7 +18,6 @@ from fastapi.staticfiles import StaticFiles
 
 from core.auth import CurrentUser, get_current_user
 from core.config import settings
-from core.database import get_connection
 from core.queries import get_employee_profile
 from nova_db.congrats import init_db as init_congrats_db
 from routers import employee, manager, congrats, auth
@@ -27,15 +26,24 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def _test_fabric_connection():
-    """Runs in a thread — pyodbc.connect() blocks and must not run on the event loop."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1")
-    cursor.fetchone()
+def _ensure_warehouse_ready():
+    """
+    Runs in a thread — the first-ever sync pulls ~570k rows from the API and
+    must not run on the event loop.
+
+    If nova_warehouse.db already holds a completed sync, this returns
+    immediately (startup stays fast); the nightly job keeps it fresh.
+    Only a cold start (no warehouse yet) blocks on a full sync.
+    """
+    from nova_db.warehouse_sync import sync_all, warehouse_is_ready, last_sync_time
+    if warehouse_is_ready():
+        logger.info("Warehouse ready (last sync: %s)", last_sync_time())
+        return
+    logger.info("Warehouse missing/incomplete — running initial sync from the Classmate API")
+    sync_all()
 
 
-# ── Lifespan: test Fabric connection on startup ───────────────────────────────
+# ── Lifespan: ensure the warehouse is ready on startup ───────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -54,9 +62,9 @@ async def lifespan(app: FastAPI):
     init_user_settings_table()
     loop = asyncio.get_event_loop()
     try:
-        await loop.run_in_executor(None, _test_fabric_connection)
-        logger.info("Fabric connection OK")
-        print("\n✓ Fabric connection OK\n")
+        await loop.run_in_executor(None, _ensure_warehouse_ready)
+        logger.info("Warehouse OK")
+        print("\n✓ Warehouse OK\n")
         try:
             from routers.manager import _init_exec_users
             loop.run_in_executor(None, _init_exec_users)
@@ -120,8 +128,9 @@ async def lifespan(app: FastAPI):
 
         def _run_nightly_refresh():
             """
-            Runs at 3 AM nightly (after Fabric DB updates 12-2 AM).
-            Refreshes all caches so they reflect the new day's data.
+            Runs at 3 AM nightly (after the lakehouse ETL updates 12-2 AM).
+            First re-syncs the local warehouse from the Classmate API, then
+            refreshes all caches so they reflect the new day's data.
             Per-manager caches (people_list_*, direct_reports_*) are cleared
             so they rebuild fresh on first access rather than pre-warmed.
             """
@@ -129,6 +138,15 @@ async def lifespan(app: FastAPI):
             from nova_db.gpt_cache import clear_by_prefix
 
             logger.info("Nightly cache refresh starting")
+
+            # Pull fresh data from the API before any cache recomputation —
+            # everything below reads the warehouse.
+            try:
+                from nova_db.warehouse_sync import sync_all
+                sync_all()
+            except Exception as exc:
+                logger.error("Nightly warehouse sync failed (caches will rebuild "
+                             "from the previous snapshot): %s", exc)
 
             # Month rollover: on the 1st (with a day<=3 backfill for a missed run),
             # award each employee the tier they ended the just-completed month with,
@@ -207,8 +225,8 @@ async def lifespan(app: FastAPI):
 
         asyncio.ensure_future(_nightly_refresh_loop())
     except Exception as exc:
-        logger.error("Fabric connection FAILED on startup: %s", exc)
-        print(f"\n✗ Fabric connection FAILED: {exc}\n")
+        logger.error("Warehouse init FAILED on startup: %s", exc)
+        print(f"\n✗ Warehouse init FAILED: {exc}\n")
     yield
 
 
@@ -241,11 +259,30 @@ app.include_router(auth.router,     prefix="/api")
 @app.get("/api/ping")
 def ping():
     """Health check — confirms the server is up and shows active config."""
+    from nova_db.warehouse_sync import last_sync_time
     return {
         "status": "ok",
         "env": settings.nova_env,
         "model": settings.openai_model,
+        "warehouse_last_sync": last_sync_time(),
     }
+
+
+@app.post("/api/admin/sync")
+async def admin_sync(user: CurrentUser = Depends(get_current_user)):
+    """
+    Manually re-sync the local warehouse from the Classmate API.
+    Runs in a worker thread (~1-2 min); readers keep the old snapshot until
+    the atomic file swap at the end.
+    """
+    from nova_db.warehouse_sync import sync_all
+    loop = asyncio.get_event_loop()
+    try:
+        counts = await loop.run_in_executor(None, sync_all)
+    except Exception as exc:
+        logger.error("Manual warehouse sync failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Sync failed: {exc}")
+    return {"ok": True, "tables": counts}
 
 
 @app.get("/api/me")
@@ -276,10 +313,9 @@ def me(user: CurrentUser = Depends(get_current_user)):
         }
 
     try:
-        conn = get_connection()
-        rows = get_employee_profile(conn, user.classmate_user_id)
+        rows = get_employee_profile(None, user.classmate_user_id)
     except Exception as exc:
-        logger.warning("/api/me Fabric lookup failed, returning auth data: %s", exc)
+        logger.warning("/api/me warehouse lookup failed, returning auth data: %s", exc)
         rows = []
 
     if rows:

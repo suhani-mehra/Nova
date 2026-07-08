@@ -4,4 +4,4 @@ __pycache__/
 .DS_Store
 nova.db
 nova_backend/nova_local.db
-.claude/settings.local.json
+.claude/settings.local.jsonnova_backend/nova_warehouse.db*

@@ -132,7 +132,7 @@ def score_all_courses() -> None:
         course_rows = query(
             """
             SELECT id, name
-            FROM classmate.dim_classmate_second_level_category
+            FROM dim_classmate_second_level_category
             WHERE is_deleted = 0
               AND is_active  = 1
               AND etl_isactive = 1
@@ -146,7 +146,7 @@ def score_all_courses() -> None:
         cert_rows = query(
             """
             SELECT id, certificate_name AS name
-            FROM classmate.dim_classmate_certificate
+            FROM dim_classmate_certificate
             WHERE is_deleted   = 0
               AND etl_isactive = 1
             """
@@ -159,7 +159,7 @@ def score_all_courses() -> None:
         lc_rows = query(
             """
             SELECT DISTINCT topic AS name
-            FROM classmate.fact_classmate_learning_credit
+            FROM fact_classmate_learning_credit
             WHERE is_deleted = 0
               AND topic IS NOT NULL
               AND topic != ''

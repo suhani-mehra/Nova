@@ -5,7 +5,7 @@ Azure AD authentication for Nova.
 
 Current state: STUB MODE
 - When AZURE_TENANT_ID is "placeholder" (local dev), auth is bypassed
-  and Pradeep Menon (user_id=5575) is loaded from Fabric as the dev user.
+  and Pradeep Menon (user_id=5575) is loaded from warehouse as the dev user.
 - When real Azure AD values are in .env, full JWT validation runs.
 
 No code changes needed when you go live — just update .env with
@@ -112,12 +112,12 @@ async def _get_dev_user() -> CurrentUser:
         return _dev_user_cache
 
     try:
-        from core.database import query as fabric_query
+        from core.database import query as warehouse_query
 
-        user_rows = fabric_query(
+        user_rows = warehouse_query(
             """
             SELECT id, aduser_name, email_id, first_name, last_name
-            FROM   classmate.dim_classmate_user
+            FROM   dim_classmate_user
             WHERE  id          = ?
               AND  is_active   = 1
               AND  etl_isactive = 1
@@ -129,7 +129,7 @@ async def _get_dev_user() -> CurrentUser:
 
         u = user_rows[0]
 
-        profile_rows = fabric_query(
+        profile_rows = warehouse_query(
             """
             WITH latest_profiles AS (
                 SELECT *,
@@ -137,10 +137,12 @@ async def _get_dev_user() -> CurrentUser:
                          PARTITION BY user_id
                          ORDER BY modified_on DESC
                        ) AS rn
-                FROM classmate.dim_classmate_employee_profile
+                FROM dim_classmate_employee_profile
                 WHERE etl_isactive = 1
                   AND is_active    = 1
                   AND is_deleted   = 0
+                  AND country_code IS NOT NULL
+                  AND UPPER(TRIM(country_code)) != 'OT'
             )
             SELECT LOWER(TRIM(display_name)) AS name
             FROM   latest_profiles
@@ -157,7 +159,7 @@ async def _get_dev_user() -> CurrentUser:
             ln = (u.get("last_name") or "").strip()
             display_name = f"{fn} {ln}".strip().title() or "Pradeep Menon"
 
-        mgr_rows = fabric_query(
+        mgr_rows = warehouse_query(
             """
             WITH latest_profiles AS (
                 SELECT *,
@@ -165,10 +167,12 @@ async def _get_dev_user() -> CurrentUser:
                          PARTITION BY user_id
                          ORDER BY modified_on DESC
                        ) AS rn
-                FROM classmate.dim_classmate_employee_profile
+                FROM dim_classmate_employee_profile
                 WHERE etl_isactive = 1
                   AND is_active    = 1
                   AND is_deleted   = 0
+                  AND country_code IS NOT NULL
+                  AND UPPER(TRIM(country_code)) != 'OT'
             )
             SELECT COUNT(*) AS report_count
             FROM   latest_profiles
@@ -188,10 +192,10 @@ async def _get_dev_user() -> CurrentUser:
             role=role,
             azure_oid=u.get("aduser_name"),
         )
-        logger.info("Dev user loaded from Fabric: %s (%s)", display_name, role)
+        logger.info("Dev user loaded from warehouse: %s (%s)", display_name, role)
 
     except Exception as exc:
-        logger.warning("Fabric lookup failed for dev user, using fallback: %s", exc)
+        logger.warning("Warehouse lookup failed for dev user, using fallback: %s", exc)
         _dev_user_cache = CurrentUser(
             classmate_user_id=5575,
             name="Pradeep Menon",

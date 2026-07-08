@@ -18,11 +18,11 @@ def calculate_streak(user_id: int, conn=None) -> dict:
     # No duration threshold — the mere act of interacting with content is the signal.
     activity_rows = query(
         """
-        SELECT DISTINCT CAST(activity_date AS DATE) AS activity_date
+        SELECT DISTINCT date(activity_date) AS activity_date
         FROM (
             -- Source 1: learning credits with actual duration (live sessions, recorded trainings)
             SELECT credit_date AS activity_date
-            FROM classmate.fact_classmate_learning_credit
+            FROM fact_classmate_learning_credit
             WHERE user_id    = ?
               AND is_deleted = 0
               AND duration   > 0
@@ -30,8 +30,8 @@ def calculate_streak(user_id: int, conn=None) -> dict:
             UNION
 
             -- Source 2: any course interaction (open, progress save, or completion)
-            SELECT CAST(modified_on AS DATE)
-            FROM classmate.fact_classmate_user_skill_status
+            SELECT date(modified_on)
+            FROM fact_classmate_user_skill_status
             WHERE user_id    = ?
               AND is_deleted = 0
               AND is_active  = 1
@@ -40,7 +40,7 @@ def calculate_streak(user_id: int, conn=None) -> dict:
 
             -- Source 3: approved self-study sessions
             SELECT attended_date
-            FROM classmate.fact_classmate_self_study
+            FROM fact_classmate_self_study
             WHERE user_id    = ?
               AND status     = 2
               AND is_deleted = 0
@@ -73,7 +73,7 @@ def calculate_streak(user_id: int, conn=None) -> dict:
     week_rows = query(
         """
         SELECT SUM(duration) AS total_dur
-        FROM classmate.fact_classmate_learning_credit
+        FROM fact_classmate_learning_credit
         WHERE user_id    = ?
           AND is_deleted = 0
           AND duration   > 0

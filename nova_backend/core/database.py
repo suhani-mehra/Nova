@@ -1,189 +1,107 @@
 """
 core/database.py
-Microsoft Fabric Data Warehouse connection via pyodbc.
+Query layer over the local SQLite warehouse (nova_warehouse.db).
 
-Uses ActiveDirectoryInteractive auth — the ODBC driver handles the browser
-login and token acquisition natively, which is the most reliable method for
-Fabric Data Warehouse.
+The warehouse is a synced copy of the Classmate lakehouse tables, refreshed
+from the table-dump API by nova_db.warehouse_sync (nightly + on demand).
+Replaces the old direct pyodbc connection to Microsoft Fabric.
 
-Usage:
+Each query opens a short-lived READ-ONLY connection: sub-millisecond for a
+local file, inherently thread-safe, and it means an in-flight nightly sync
+(which atomically swaps the DB file) can never corrupt a reader.
+
+Usage (unchanged from the Fabric era):
     from core.database import get_connection, query, query_df
 """
 
 import logging
-import struct
-import threading
-import time
+import re
+import sqlite3
+from datetime import date, datetime
 from typing import Optional
 
 import pandas as pd
-import pyodbc
-from azure.identity import InteractiveBrowserCredential
-
-from core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── Connection cache ──────────────────────────────────────────────────────────
-# pyodbc connections are NOT safe for concurrent use across threads.
-# We keep one credential (shared — one browser login) but give each worker
-# thread its own connection via threading.local().
-
-_TOKEN_SCOPE = "https://database.windows.net/.default"
-_CONNECTION_TTL_SECONDS = 55 * 60  # reconnect before the 60-min Azure token expiry
-
-_credential: Optional[InteractiveBrowserCredential] = None
-_credential_lock = threading.Lock()
-_local = threading.local()   # per-thread: .connection, .connected_at
+# pyodbc returned DATE/DATETIME columns as datetime.date/datetime.datetime
+# objects; SQLite stores them as ISO strings. Convert strict ISO strings back
+# so downstream Python date arithmetic keeps working unchanged.
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?$")
 
 
-def _is_stale(connected_at: float) -> bool:
-    return (time.monotonic() - connected_at) >= _CONNECTION_TTL_SECONDS
+def _revive(value):
+    """ISO date/datetime string → date/datetime object (pyodbc parity)."""
+    if isinstance(value, str):
+        if _DATETIME_RE.match(value):
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return value
+        if _DATE_RE.match(value):
+            try:
+                return datetime.fromisoformat(value).date()
+            except ValueError:
+                return value
+    return value
 
 
-def _get_credential() -> InteractiveBrowserCredential:
-    global _credential
-    with _credential_lock:
-        if _credential is None:
-            # For B2B guest accounts the token must come from the user's HOME tenant,
-            # not the Orion (resource) tenant.  Set FABRIC_AUTH_TENANT_ID in .env to
-            # override; falls back to AZURE_TENANT_ID for native Orion accounts.
-            auth_tenant = settings.fabric_auth_tenant_id or settings.azure_tenant_id
-            _credential = InteractiveBrowserCredential(tenant_id=auth_tenant)
-    return _credential
-
-
-def _open_connection() -> pyodbc.Connection:
-    """
-    Gets an Azure token via browser login (once per process) and passes it
-    to pyodbc via SQL_COPT_SS_ACCESS_TOKEN (attrs_before key 1256).
-    """
-    credential = _get_credential()
-    token = credential.get_token(_TOKEN_SCOPE)
-    token_bytes = token.token.encode("utf-16-le")
-    token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
-
-    conn_str = (
-        f"Driver={{{settings.fabric_driver}}};"
-        f"Server={settings.fabric_server};"
-        f"Database={settings.fabric_database};"
+def _adapt_params(params: Optional[tuple]) -> tuple:
+    """date/datetime params → ISO strings (matches the stored 'T' format)."""
+    if not params:
+        return ()
+    return tuple(
+        p.isoformat() if isinstance(p, (datetime, date)) else p
+        for p in params
     )
-    return pyodbc.connect(conn_str, attrs_before={1256: token_struct})
 
 
-def get_connection() -> pyodbc.Connection:
+def _warehouse_path():
+    from nova_db.warehouse_sync import warehouse_path
+    return warehouse_path()
+
+
+def get_connection() -> sqlite3.Connection:
     """
-    Returns an active pyodbc connection for the current thread.
-    - First call on any thread: reuses the cached credential (one browser login
-      for the whole process), opens a fresh pyodbc connection for this thread.
-    - Subsequent calls on the same thread within 55 min: return the cached
-      per-thread connection with no round-trip to Azure.
-    - After 55 min: silently reconnects this thread's connection.
+    Read-only connection to the warehouse. Kept for legacy callers that pass
+    a `conn` around (core/queries.py functions accept-and-ignore it).
     """
-    conn = getattr(_local, "connection", None)
-    connected_at = getattr(_local, "connected_at", 0.0)
-
-    if conn is not None and not _is_stale(connected_at):
-        return conn
-
-    if conn is not None:
-        logger.info("Fabric connection stale (thread %s) — reconnecting.", threading.current_thread().name)
-        try:
-            conn.close()
-        except Exception:
-            pass
-        _local.connection = None
-
-    try:
-        _local.connection = _open_connection()
-        _local.connected_at = time.monotonic()
-        logger.info("Fabric connection established (thread %s).", threading.current_thread().name)
-    except Exception as exc:
-        _local.connection = None
-        if settings.is_dev:
-            logger.error("Fabric connection failed (dev mode): %s", exc)
-        raise
-
-    return _local.connection
-
-
-# ── Public query helpers ──────────────────────────────────────────────────────
-
-# pyodbc SQLSTATE codes that indicate a dropped/broken connection — safe to retry.
-_TRANSIENT_STATES = {"08S01", "08001", "HYT00", "HY000"}
-_MAX_RETRIES = 2
-
-
-def _is_transient(exc: Exception) -> bool:
-    args = getattr(exc, "args", ())
-    if args and isinstance(args[0], str) and args[0] in _TRANSIENT_STATES:
-        return True
-    # pyodbc sometimes wraps the state inside a tuple as the first arg
-    if args and isinstance(args[0], tuple) and args[0] and args[0][0] in _TRANSIENT_STATES:
-        return True
-    return False
-
-
-def _drop_connection():
-    """Force-close this thread's connection so the next get_connection() reconnects."""
-    conn = getattr(_local, "connection", None)
-    if conn is not None:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        _local.connection = None
+    path = _warehouse_path()
+    if not path.exists():
+        raise RuntimeError(
+            f"Warehouse DB not found at {path}. "
+            "Run the sync first: python -m nova_db.warehouse_sync "
+            "(or POST /api/admin/sync)."
+        )
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    return conn
 
 
 def query(sql: str, params: Optional[tuple] = None) -> list[dict]:
-    """
-    Executes a parameterised SQL query and returns results as a list of dicts.
-    Retries up to _MAX_RETRIES times on transient connection failures (08S01 etc.)
-    by dropping and re-opening the per-thread connection.
-    """
-    for attempt in range(_MAX_RETRIES + 1):
-        conn = get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(sql, params or ())
-            columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
-        except Exception as exc:
-            if _is_transient(exc) and attempt < _MAX_RETRIES:
-                logger.warning(
-                    "Transient Fabric error (attempt %d/%d), reconnecting: %s",
-                    attempt + 1, _MAX_RETRIES, exc,
-                )
-                _drop_connection()
-                time.sleep(0.5 * (attempt + 1))
-                continue
-            if settings.is_dev:
-                logger.error("Query failed: %s\nSQL: %s\nParams: %s", exc, sql, params)
-            raise
+    """Executes a parameterised SQL query and returns results as a list of dicts."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(sql, _adapt_params(params))
+        columns = [col[0] for col in cursor.description]
+        return [
+            {col: _revive(val) for col, val in zip(columns, row)}
+            for row in cursor.fetchall()
+        ]
+    except Exception as exc:
+        logger.error("Query failed: %s\nSQL: %s\nParams: %s", exc, sql, params)
+        raise
+    finally:
+        conn.close()
 
 
 def query_df(sql: str, params: Optional[tuple] = None) -> pd.DataFrame:
-    """
-    Executes a parameterised SQL query and returns results as a pandas DataFrame.
-    Retries on transient connection failures.
-    """
-    for attempt in range(_MAX_RETRIES + 1):
-        conn = get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(sql, params or ())
-            columns = [col[0] for col in cursor.description]
-            rows = cursor.fetchall()
-            return pd.DataFrame([list(row) for row in rows], columns=columns)
-        except Exception as exc:
-            if _is_transient(exc) and attempt < _MAX_RETRIES:
-                logger.warning(
-                    "Transient Fabric error query_df (attempt %d/%d), reconnecting: %s",
-                    attempt + 1, _MAX_RETRIES, exc,
-                )
-                _drop_connection()
-                time.sleep(0.5 * (attempt + 1))
-                continue
-            if settings.is_dev:
-                logger.error("query_df failed: %s\nSQL: %s\nParams: %s", exc, sql, params)
-            raise
+    """Executes a parameterised SQL query and returns results as a pandas DataFrame."""
+    conn = get_connection()
+    try:
+        return pd.read_sql_query(sql, conn, params=_adapt_params(params))
+    except Exception as exc:
+        logger.error("query_df failed: %s\nSQL: %s\nParams: %s", exc, sql, params)
+        raise
+    finally:
+        conn.close()

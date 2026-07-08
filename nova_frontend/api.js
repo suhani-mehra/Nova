@@ -184,9 +184,8 @@ const REGION_COLORS = {
   asia:  '#FF4398',
   na:    '#2ACCFF',
   eu:    '#A634FF',
-  other: '#9aa2b1',
 };
-const REGION_KEYS = ['asia', 'na', 'eu', 'other'];
+const REGION_KEYS = ['asia', 'na', 'eu'];
 
 // Shapes the backend's proficiency_by_region payload into a chart-ready object.
 // Returns null when the payload is missing or has no employees (background job
