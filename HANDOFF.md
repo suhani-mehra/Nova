@@ -13,11 +13,17 @@ It has two audiences, served from one app:
   5-axis skill radar (AI/Cloud/Frontend/Backend/Data), badges earned each month, a
   "continue learning" / recommended course, and what your teammates have accomplished
   (with the ability to send "congrats").
-- **Manager view ("Overview" / "Teams" / "People")** — company KPIs (headcount, active
-  learners, % AI-proficient, retention, at-risk count), an AI-proficiency trend chart by
-  quarter (with a second "by region" tab breaking down four proficiency levels by
-  Asia/North America/Europe/Other), per-department proficiency, and a searchable people list
-  with each person's tier and proficiency.
+- **Manager view — two tabs:**
+  - **Overview** (company-wide, **exec managers only**): an AI-proficiency trend chart by
+    quarter with a second "by region" tab (four proficiency levels split by
+    Asia/North America/Europe/Other), a Proficiency-by-Vertical chart, an Active-learners-this-week
+    card, a Specialization Landscape, and a per-department Team Leaderboard.
+  - **Your Team** (direct reports only, **any manager**): a team-average skill radar, a badges
+    donut, active-learners + courses-completed this week, and a searchable people list with each
+    person's tier, proficiency, and learning streak.
+
+The whole app is **light or dark**, a per-account preference toggled from the profile menu and
+persisted server-side (see §5).
 
 The core idea: an LLM grades every course on 5 skill verticals; each employee's completed
 courses roll up into skill scores and a composite **tier**; tiers reset monthly and mint a
@@ -77,7 +83,7 @@ Common filters: `is_active=1 AND is_deleted=0 AND etl_isactive=1`.
 
 ## 4. Local SQLite cache (`nova_local.db`)
 
-Five tables. Three are **derived caches** (safe to purge/rebuild); two are **app-owned data**
+Six tables. Three are **derived caches** (safe to purge/rebuild); three are **app-owned data**
 (must persist).
 
 | Table | Kind | Contents |
@@ -87,6 +93,7 @@ Five tables. Three are **derived caches** (safe to purge/rebuild); two are **app
 | `user_tier_scores` | derived | The percentile-ranking population: `{user_id → composite tier_score}` for the current month. |
 | `user_badges` | **app-owned** | Monthly badges: `(user_id, tier, month 'YYYY-MM', awarded_at)`, `UNIQUE(user_id, month)`. |
 | `congrats` | **app-owned** | Peer congratulations: `(sender, receiver, activity_id, message, created_at)`. |
+| `user_settings` | **app-owned** | Per-account preferences: `(user_id PK, color_mode 'light'|'dark', updated_at)`. See `nova_db/user_settings.py`. |
 
 `gpt_cache` is a simple table: `cache_key`, `result` (JSON), `scored_by`, `expires_at`.
 Helpers: `get_cache` (respects expiry), `get_cache_stale` (ignores expiry, for
@@ -105,9 +112,22 @@ stale-while-revalidate), `set_cache(key, result, scored_by, ttl_hours)`,
   Loads **Pradeep Menon (user_id 5575)** by default. Role is `"both"` because he has reports
   (so you can see employee and manager views).
 - **Role** is one of `"employee"`, `"manager"`, `"both"` and drives which tabs/data load.
-- **Dev impersonation:** exec dev users (IDs `16467`, `16465`, `16470` = Niva Shah, Eric
-  Verdes, Suhani Mehra) can pass `X-Nova-Dev-User` (sign in as any user) or
-  `X-Nova-Impersonate` (view as another user). The frontend stores these in sessionStorage.
+- **Exec managers** are a separate, narrower concept layered on top of role. `EXEC_USER_IDS`
+  in `routers/manager.py` (`{5575, 16467, 16465, 16470}`, extended at startup from
+  `EXEC_USER_NAMES` via `_init_exec_users()`) governs company-wide access. The Overview tab
+  and `/api/manager/overview` are gated by `_is_exec_manager(user)` = *in `EXEC_USER_IDS`
+  **and** actually a manager* (`role in {manager, both}`). Since the non-Pradeep IDs aren't
+  managers, this resolves to **Pradeep Menon (5575) only** today. `/api/me` surfaces this as
+  `is_exec_manager` so the frontend shows/hides the Overview tab. `RECURSIVE_USER_IDS` (`{5575}`)
+  additionally unlocks recursive-org people search for that user.
+- **Dev impersonation:** the *same* exec IDs can pass `X-Nova-Dev-User` (sign in as any user)
+  or `X-Nova-Impersonate` (view as another user). The frontend stores these in sessionStorage
+  and only shows the impersonation panel for `16467/16465/16470`.
+- **Color mode (light/dark):** a per-account preference stored in `user_settings.color_mode`
+  (`nova_db/user_settings.py`). `/api/me` returns `color_mode`; the profile-menu toggle writes
+  it via `POST /api/me/color-mode`. The frontend stamps `<html data-theme>` (see §8) and caches
+  the last value in `localStorage` (`nova_theme`) for a flash-free boot before `/api/me`
+  reconciles the authoritative account value.
 - **Fabric connection:** a single process-wide `InteractiveBrowserCredential` acquires an
   Azure token (scope `https://database.windows.net/.default`); the token is injected into
   `pyodbc.connect(..., attrs_before={1256: token_struct})`. Connections are per-thread and
@@ -261,48 +281,79 @@ the first uncompleted catalog course if the LLM fails. Cached as `recommend_{uid
   with **training/compliance modules filtered out** (keyword list → all-zero vertical scores
   → keyword classifier).
 
-### 6.9 Manager KPIs (Overview)
+### 6.9 Manager Overview (company-wide, exec managers only)
 
-- **Total team / headcount:** count of active employees company-wide.
-- **Active this week:** employees with any activity in the current week (from streak cache).
-- **% / # AI-proficient:** from the latest completed quarter of the AI-proficiency trend.
-- **Avg credits this quarter:** mean of per-user completed credits over the last 90 days.
-- **Retention rate:** share of employees active (any learning credit) in the last 30 days;
-  trend = current 30-day window vs the prior 30-day window.
-- **At-risk count (company KPI):** a health score `0.7*(AI/100) + 0.3*(active_this_week?1:0)`;
-  a person is **at risk if health < 0.20**. (Note: the *employee/team* at-risk list in the
-  team service uses a different rule — inactive ≥ 14 days **and** credits below the team
-  average — since it answers a different, team-local question.)
+Served by `GET /api/manager/overview` (403 unless `_is_exec_manager`). Contents:
 
-**AI-proficiency trend chart:** builds 6 completed quarters (plus a hidden warm-up quarter
-for context). Per quarter, each employee's cumulative AI raw (up to that quarter's end) is
-normalized with the same `^0.4` curve and compared to the `≥30` threshold; the line is the
+- **Active learners this week:** the one surviving headline KPI (a gradient hero card). Count
+  of active employees with ≥1 active day this week, computed **directly from Fabric in one
+  query** using the 3-source activity union (learning credit w/ duration, skill-status update,
+  attended self-study) restricted to active employees — `_get_company_active_this_week()`. It
+  does **not** depend on per-user `streak_{uid}` caches being warm (an earlier version read
+  those and reported 0 at cold start). Trend = current count vs a weekly baseline
+  (`company_active_prev`, 7-day TTL). `total_team` (company headcount) drives the "% of N"
+  denominator.
+
+**AI-proficiency trend chart (Trend tab):** builds 6 completed quarters (plus a hidden warm-up
+quarter for context). Per quarter, each employee's cumulative AI raw (up to that quarter's end)
+is normalized with the same `^0.4` curve and compared to the `≥30` threshold; the line is the
 % of employees proficient. A second dashed line shows **% active learners** per quarter. The
 **current, in-progress quarter is excluded** (the chart is "measured at quarter end") so the
 line doesn't dip on partial data. Target line drawn at 80%.
 
-**AI-proficiency by region (second Overview tab):** a stacked bar chart, one bar per
-proficiency level (Professional → Champion), each stacked by region (Asia / North America /
-Europe / Other). Bar height = % of the whole company at that level; the goal % is drawn as a
-dashed line above each bar. `_compute_ai_proficiency_by_region()` reuses the same warm
-`classify_{uid}` AI-score cache as the dept snapshot (no rescoring), maps each employee's
-`country_code` to a region via `core/geo.py`, and counts per level/region. Region membership
-comes from real, confirmed Fabric data (6,859 active employees; no invented "unmapped"
-catch-all — every country_code present resolves to Asia/NA/Europe/Other per an explicit
-mapping agreed with the product owner, including a few judgment calls: Turkey→Asia,
-Russia/RF→Europe, Switzerland(`SWZ`)→Europe, Australia/null/`OT`→Other). Cached as
-`ai_proficiency_by_region`, same 25h TTL / nightly-recompute pattern as the trend chart.
+**AI-proficiency by region (By region tab):** a **grouped** bar chart, one group per proficiency
+level (Professional → Champion) with one bar per region (Asia / North America / Europe / Other).
+Each bar's height = **that region's own % proficient** at the level (independent of headcount, so
+a large region doesn't visually swamp the rest); a dashed line marks the company-wide goal and a
+solid grey tick marks the company-wide actual. `_compute_ai_proficiency_by_region()` reuses the
+same warm `classify_{uid}` AI-score cache as the dept snapshot (no rescoring), maps each
+employee's `country_code` to a region via `core/geo.py`, and counts per level/region. Region
+membership comes from real, confirmed Fabric data (no invented "unmapped" catch-all — every
+country_code present resolves to Asia/NA/Europe/Other per an explicit mapping agreed with the
+product owner, including a few judgment calls: Turkey→Asia, Russia/RF→Europe,
+Switzerland(`SWZ`)→Europe, Australia/null/`OT`→Other). Cached as `ai_proficiency_by_region`,
+same 25h TTL / nightly-recompute pattern as the trend chart.
 
-**Teams (per-department):** for each department, % of members who are AI-proficient (`≥30`).
-The **trend** compares the current % against a **period-stable baseline** (`dept_ai_baseline`,
-refreshed ~every 30 days, never seeded from a degenerate/cold snapshot) so it shows an honest
-month-over-month delta rather than a spurious jump. Status badge: ≥70% "On track", ≥50%
-"Needs focus", else "Falling behind".
+**Team Leaderboard:** per-department AI proficiency (name + bar + %), sourced from the same
+`_compute_dept_snapshot()` cache (each department = % of members AI-proficient at `≥30`),
+sorted best-first, shown top 6. Folded into the overview response as `team_leaderboard`.
 
-**People:** manager's direct reports with tier (live `tier_{uid}` overlay), AI proficiency,
-credits (90-day), last active, and status (`at risk` if AI proficiency < 20, else `on
-track`). Search supports direct-reports / company-wide / recursive-org scopes (fuzzy match)
-with the same enriched fields.
+**Proficiency by Vertical** and **Specialization Landscape** are **static placeholders**
+(hardcoded in `nova_frontend/data.js` as `NOVA.managerStatic`, marked TODO). There is **no
+business-vertical / specialization-track taxonomy** anywhere in Classmate/Fabric — real
+`department_code` values are short internal codes (`dev`, `qa`, `hyd`, `mex`), unrelated to the
+mockup's client-industry names — so these two charts wait for a real API.
+
+### 6.9b Manager "Your Team" (direct reports, any manager)
+
+Served by `GET /api/manager/your-team` (any manager; `_require_manager`). Layout: a top row of
+a team radar, a badges donut, and a stacked right rail (Active learners + Courses completed this
+week), then the people table. Returns:
+
+- **people:** direct reports enriched via `_build_people_list()` — tier (live `tier_{uid}`
+  overlay), AI proficiency, 90-day credits, last active, status (`at risk` if AI proficiency
+  < 20, else `on track`), and **`streak_days`** (from `get_team_streaks()`, reading warm
+  `streak_{uid}` caches / computing misses per-user). The people table shows a 🔥 streak pill
+  next to the name when `streak_days > 0`.
+- **radar:** team-averaged skill radar with two series (`get_team_skill_radar()` averages each
+  axis's `this_month` / `last_month` across the reports, reusing the `classify_{uid}` cache).
+  The frontend applies a visual floor shift (0 → the 25% ring) so an all-zero team doesn't
+  collapse to the center, and passes the true (unshifted) values as per-axis % labels — matching
+  the employee Skill Growth radar.
+- **badges:** team badge summary (`get_team_badge_summary()` in `nova_db/badges.py`) — total,
+  avg per person, this-month count, and a per-tier breakdown — rendered as a **hollow donut**
+  (`DonutChart` in `charts.jsx`) with the total in the center and a color key listing each
+  tier's count beside it.
+- **active_this_week / courses_this_week:** direct-reports-scoped counts for the current week,
+  via `_get_team_active_this_week(uids)` (3-source activity union) and
+  `_get_team_courses_completed_this_week(uids)` (completed `vw_classmate_trainings` rows). Both
+  reuse the same weekly window as the company metric, filtered to the manager's report uids;
+  shown as the two rail cards (count + "% / across N direct reports"). `team_size` is the
+  denominator. Cached with radar/badges under `your_team_v3_{mgr_id}` (25h TTL, SWR-served).
+
+**People search** (`GET /api/manager/people/search`, fuzzy) is scoped by exec status: exec
+managers search company-wide (Pradeep additionally recursive-org); everyone else searches only
+their direct reports. Results carry the same enriched fields incl. `streak_days`.
 
 ### 6.10 Congrats
 
@@ -338,30 +389,46 @@ costs LLM calls to rebuild) or the app-owned `user_badges` / `congrats`.
 
 ## 8. Frontend data flow
 
-1. `data.js` seeds an empty `window.NOVA` shape (and fallback demo values).
-2. `api.js` `initNova()` runs on load: fetches `/api/me`, determines role, then fetches the
-   role's endpoints (employee dashboard+team, and/or manager overview+teams+people). Mapper
-   functions (`mapMe`, `mapDashboard`, `mapTeam`, `mapManager`) reshape backend JSON into the
-   `NOVA.employee` / `NOVA.team` / `NOVA.manager` / `NOVA.accounts` structures. A
-   `__novaDataReady` promise gates rendering; for role "both" a `nova-manager-ready` event
-   re-renders when manager data lands.
+1. `data.js` seeds `window.NOVA` (nulls, `TIERS`, and `managerStatic` — the static
+   Vertical/Specialization placeholder data).
+2. `api.js` `initNova()` runs on load: fetches `/api/me` (which includes `is_exec_manager`),
+   determines role, then fetches the role's endpoints. Manager data is loaded by
+   `loadManagerData(isExec)`: it always fetches `/api/manager/your-team` and fetches
+   `/api/manager/overview` **only for exec managers** (avoids a needless 403). Mappers
+   (`mapMe`, `mapDashboard`, `mapTeam`, `mapOverview`, `mapYourTeam`) reshape backend JSON into
+   `NOVA.employee` / `NOVA.team` / `NOVA.manager` / `NOVA.accounts`. `NOVA.manager` holds
+   `{isExec, overview, team, static}`. A `__novaDataReady` promise gates rendering; for role
+   "both" a `nova-manager-ready` event re-renders when manager data lands.
 3. `app.jsx` is the shell: tabs per role, account switching (employee↔manager for "both"),
-   loading/sign-in/error gating.
+   loading/sign-in/error gating. Manager tabs are `Overview` + `Your Team`, and `Overview` is
+   dropped from the list entirely when `NOVA.accounts.isExecManager` is false. `ProfileMenu`
+   holds the light/dark toggle (calls `applyTheme` + `saveColorMode` from `api.js`).
 4. Views: **MyProgress** (tier card + badges, streak, skill radar, continue/recommended),
    **MyTeam** (highlights, accomplishments with congrats, team recommendations),
-   **MgrOverview** (KPI cards + a chart card with two tabs — "Trend" line chart and "By
-   region" bar chart), **MgrTeams** (per-dept proficiency bars), **MgrPeople** (searchable
-   people table).
+   **MgrOverview** (two-column: chart card with "Trend"/"By region" toggle + Proficiency-by-Vertical
+   on the left; Active-learners hero + Specialization Landscape + Team Leaderboard on the
+   right), **MgrYourTeam** (team radar + badges donut + active/courses-this-week rail, then the
+   searchable people table with 🔥 streak pills).
 5. `charts.jsx`: **RadarChart** (5-axis skill polygon; this-month solid, last-month dashed,
-   optional teammate compare), **LineChart** (quarterly AI-proficient % filled line + %
-   active dashed line + 80% target), and **RegionProficiencyChart** (stacked bar per
-   proficiency level, segmented by region, with a dashed per-level goal line and a hover
-   tooltip showing that region's own proficiency rate). Ribbons/tier visuals in `icons.jsx`.
+   optional teammate compare, optional per-axis `labelValues` %), **LineChart** (quarterly
+   AI-proficient % filled line + % active dashed line + 80% target), **RegionProficiencyChart**
+   (grouped bars per proficiency level — one bar per region at that region's own proficiency
+   rate, with a dashed per-level goal line, a company-actual tick, and a hover tooltip), and
+   **DonutChart** (hollow ring with a centered total and a color key). Chart neutrals use
+   `--chart-grid`/`--chart-label`/`--tooltip-*` tokens so charts stay legible in dark mode;
+   brand series colors are theme-independent. Ribbons/tier visuals in `icons.jsx`.
+6. **Theming:** `styles.css` defines all neutral/surface/chart tokens under `:root` and a dark
+   override under `:root[data-theme="dark"]` (brand accents stay identical). `<html data-theme>`
+   is set pre-paint by an inline script in `index.html` (from `localStorage.nova_theme`) and
+   reconciled by `initNova` from the account's `color_mode`. Buttons don't inherit page text
+   color, so interactive chrome (e.g. `.profile-btn`) sets `color:var(--ink)` explicitly.
 
 The frontend mapping is where raw fields become display fields — e.g. `tier.progress →
-E.tierProgress`, `skills.this_month → radar`, `monthly_trend → months + series`,
-`proficiency_by_region → NOVA.manager.proficiencyByRegion` (via `mapProficiencyByRegion` in
-`api.js`), `departments[].ai_proficient_pct → team.prof`, badge rows → grouped tier columns.
+E.tierProgress`, `skills.this_month → radar`, `monthly_trend → overview.months + series`,
+`proficiency_by_region → overview.proficiencyByRegion` (via `mapProficiencyByRegion`),
+`team_leaderboard → overview.teamLeaderboard`, `your-team employees → team.people`
+(with `streak_days → streak`), `active_this_week/courses_this_week → team.activeThisWeek /
+team.coursesThisWeek`, `color_mode → account.colorMode`, badge counts → donut segments.
 
 ---
 
@@ -382,6 +449,7 @@ E.tierProgress`, `skills.this_month → radar`, `monthly_trend → months + seri
 | Streak min | 1800 s/day setting (activity-based day detection) |
 | Completed status | `4052` (course), `2` (cert/self-study); in-progress `4035` |
 | Dev user | Pradeep Menon `5575`; exec devs `16467/16465/16470` |
+| Exec managers (Overview gate) | `EXEC_USER_IDS` ∩ managers → Pradeep `5575` only today |
 | LLM | Azure OpenAI `gpt-4o-mini` |
 | Nightly refresh | 03:00 UTC |
 

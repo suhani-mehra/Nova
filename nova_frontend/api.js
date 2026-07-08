@@ -275,8 +275,16 @@ function mapOverview(data) {
 function mapYourTeam(data) {
   const people = (data.employees || []).map(_mapPersonRow);
   const b = data.badges || {};
+  const teamSize = data.team_size != null ? data.team_size : people.length;
+  const activeCount = data.active_this_week || 0;
   return {
     size:   people.length,
+    activeThisWeek: {
+      count: activeCount,
+      total: teamSize,
+      pct:   teamSize ? (activeCount / teamSize * 100) : 0,
+    },
+    coursesThisWeek: data.courses_this_week || 0,
     radar:  data.radar || {axes:['AI','Cloud','Frontend','Backend','Data'], this_month:[0,0,0,0,0], last_month:[0,0,0,0,0]},
     badges: {
       total:          b.total || 0,
@@ -305,10 +313,28 @@ function mapMe(data) {
     av:    avByRole[data.role] || avByRole.employee,
     kind:  data.role,  // passes through "employee" | "manager" | "both"
     isExecManager: !!data.is_exec_manager,
+    colorMode: data.color_mode || 'light',
   };
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
+
+// Apply a color mode app-wide: stamp <html data-theme> (CSS palette hook) and
+// cache it so the next load is flash-free. Global so app.jsx + api.js share it.
+function applyTheme(mode) {
+  const m = mode === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = m;
+  try { localStorage.setItem('nova_theme', m); } catch (e) {}
+}
+window.applyTheme = applyTheme;
+
+// Persist the account's color mode to the backend (fire-and-forget).
+async function saveColorMode(mode) {
+  try {
+    await apiPost('/api/me/color-mode', { mode });
+  } catch (e) { console.warn('[Nova] save color mode failed:', e); }
+}
+window.saveColorMode = saveColorMode;
 
 let _resolveDataReady;
 window.__novaDataReady = new Promise(function(resolve) { _resolveDataReady = resolve; });
@@ -379,6 +405,10 @@ async function initNova() {
     window.NOVA.accounts.role = role;
     // Exec managers (company-wide Overview tab) — everyone else sees Your Team only.
     window.NOVA.accounts.isExecManager = !!meData.is_exec_manager;
+    // Apply the account's saved color mode (authoritative over the pre-boot
+    // localStorage guess) and cache it for a flash-free next load.
+    window.NOVA.accounts.colorMode = meData.color_mode || 'light';
+    if (typeof applyTheme === 'function') applyTheme(window.NOVA.accounts.colorMode);
 
     if (role === 'employee') {
       window.NOVA.accounts.manager = null;

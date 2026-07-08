@@ -19,13 +19,13 @@ function TierTrack({tiers, currentKey}){
 }
 
 /* ---------- Radar / skill chart ---------- */
-function RadarChart({axes, thisMonth, lastMonth, compareWith=null, size=300}){
+function RadarChart({axes, thisMonth, lastMonth, compareWith=null, size=300, labelValues=null}){
   const cx=size/2, cy=size/2+8, R=size*0.34, n=axes.length;
   const angle = i => (-90 + i*(360/n)) * Math.PI/180;
   const pt = (i,val) => [cx + Math.cos(angle(i))*R*(val/100), cy + Math.sin(angle(i))*R*(val/100)];
   const poly = arr => arr.map((v,i)=>pt(i,v).join(',')).join(' ');
   const rings=[25,50,75,100];
-  return h('svg',{viewBox:`0 0 ${size} ${size}`, width:'100%', style:{maxWidth:size, display:'block', margin:'0 auto'}},
+  return h('svg',{viewBox:`0 0 ${size} ${size}`, width:'100%', style:{maxWidth:size, display:'block', margin:'0 auto', overflow:'visible'}},
     h('defs',null,
       h('linearGradient',{id:'radarFill', x1:'0',y1:'0',x2:'1',y2:'1'},
         h('stop',{offset:'0%', stopColor:'#A634FF', stopOpacity:.34}),
@@ -34,13 +34,14 @@ function RadarChart({axes, thisMonth, lastMonth, compareWith=null, size=300}){
     // grid rings
     rings.map((r,ri)=>h('polygon',{key:'r'+ri,
       points:axes.map((_,i)=>pt(i,r).join(',')).join(' '),
-      fill:'none', stroke:'#e7e6f0', strokeWidth:1})),
-    // spokes + labels
+      fill:'none', stroke:'var(--chart-grid)', strokeWidth:1})),
+    // spokes + labels (+ optional per-axis % under the label)
     axes.map((ax,i)=>{
       const [x,y]=pt(i,100); const [lx,ly]=pt(i,124);
       return h('g',{key:'ax'+i},
-        h('line',{x1:cx,y1:cy,x2:x,y2:y, stroke:'#e7e6f0', strokeWidth:1}),
-        h('text',{x:lx,y:ly+4, textAnchor:'middle', fontSize:13, fontWeight:700, fill:'#7a7d96'}, ax)
+        h('line',{x1:cx,y1:cy,x2:x,y2:y, stroke:'var(--chart-grid)', strokeWidth:1}),
+        h('text',{x:lx,y:ly+4, textAnchor:'middle', fontSize:13, fontWeight:700, fill:'var(--chart-label)'}, ax),
+        labelValues ? h('text',{x:lx,y:ly+20, textAnchor:'middle', fontSize:12.5, fontWeight:800, fill:'var(--muted-2)'}, Math.round(labelValues[i])+'%') : null
       );
     }),
     // last month (dashed blue)
@@ -76,14 +77,14 @@ function LineChart({months, proficiency, active, target, total}){
       ),
       // y grid + labels
       yticks.map(t=>h('g',{key:'y'+t},
-        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t),stroke:'#eeedf5',strokeWidth:1}),
-        h('text',{x:padL-10,y:iy(t)+4,textAnchor:'end',fontSize:11.5,fontWeight:600,fill:'#9a9db4'}, t+'%')
+        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t),stroke:'var(--chart-grid)',strokeWidth:1}),
+        h('text',{x:padL-10,y:iy(t)+4,textAnchor:'end',fontSize:11.5,fontWeight:600,fill:'var(--chart-label)'}, t+'%')
       )),
       // target line
       h('line',{x1:padL,y1:iy(target),x2:W-padR,y2:iy(target),stroke:'#FF4398',strokeWidth:1.6,strokeDasharray:'6 5',opacity:.55}),
       h('text',{x:W-padR,y:iy(target)-7,textAnchor:'end',fontSize:11,fontWeight:800,fill:'#FF4398'}, `Target ${target}%`),
       // x labels
-      months.map((m,i)=>h('text',{key:'x'+i,x:ix(i),y:H-padB+22,textAnchor:'middle',fontSize:11.5,fontWeight:600,fill:'#9a9db4'}, m)),
+      months.map((m,i)=>h('text',{key:'x'+i,x:ix(i),y:H-padB+22,textAnchor:'middle',fontSize:11.5,fontWeight:600,fill:'var(--chart-label)'}, m)),
       // active learners (dashed)
       h('path',{d:linePath(active),fill:'none',stroke:'#2ACCFF',strokeWidth:2.4,strokeDasharray:'6 5',strokeLinecap:'round'}),
       // proficiency
@@ -141,8 +142,8 @@ function RegionProficiencyChart({data}){
     h('svg',{viewBox:`0 0 ${W} ${H}`, width:'100%', onMouseLeave:()=>setHover(null)},
       // y grid + labels
       yticks.map(t=>h('g',{key:'y'+t},
-        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t), stroke:'#eeedf5', strokeWidth:1}),
-        h('text',{x:padL-10,y:iy(t)+4,textAnchor:'end',fontSize:11.5,fontWeight:600,fill:'#9a9db4'}, t+'%')
+        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t), stroke:'var(--chart-grid)', strokeWidth:1}),
+        h('text',{x:padL-10,y:iy(t)+4,textAnchor:'end',fontSize:11.5,fontWeight:600,fill:'var(--chart-label)'}, t+'%')
       )),
       // per-level groups
       levels.map((lv,li)=>{
@@ -167,25 +168,25 @@ function RegionProficiencyChart({data}){
         // company-wide actual — solid grey tick across the group
         const cy=iy(lv.totalPct);
         const companyTick=h('g',{key:'co'},
-          h('line',{x1:gl-4,y1:cy,x2:gl+groupW+4,y2:cy, stroke:'#7a7d96',strokeWidth:2}),
-          h('circle',{cx:gl-4,cy,r:2.5,fill:'#7a7d96'}),
-          h('circle',{cx:gl+groupW+4,cy,r:2.5,fill:'#7a7d96'}));
+          h('line',{x1:gl-4,y1:cy,x2:gl+groupW+4,y2:cy, stroke:'var(--muted)',strokeWidth:2}),
+          h('circle',{cx:gl-4,cy,r:2.5,fill:'var(--muted)'}),
+          h('circle',{cx:gl+groupW+4,cy,r:2.5,fill:'var(--muted)'}));
 
         // goal — dashed line above/below, spanning a bit wider than the group
         const gy=iy(lv.goalPct);
         const gw=groupW+20;
         const goal=h('g',{key:'g'},
           h('line',{x1:cx(li)-gw/2,y1:gy,x2:cx(li)+gw/2,y2:gy,
-            stroke:'#3a3d57',strokeWidth:1.8,strokeDasharray:'5 4',opacity:.85}),
+            stroke:'var(--chart-label)',strokeWidth:1.8,strokeDasharray:'5 4',opacity:.85}),
           h('text',{x:cx(li)+gw/2,y:gy-5,textAnchor:'end',fontSize:10.5,fontWeight:800,
-            fill:'#3a3d57'}, 'Goal '+lv.goalPct+'%'));
+            fill:'var(--chart-label)'}, 'Goal '+lv.goalPct+'%'));
 
         // x-axis level name + company-wide summary
         const xlab=h('g',{key:'xl'},
           h('text',{x:cx(li),y:H-padB+22,textAnchor:'middle',fontSize:13.5,fontWeight:800,
-            fill:'#181a2e'}, lv.name),
+            fill:'var(--ink)'}, lv.name),
           h('text',{x:cx(li),y:H-padB+39,textAnchor:'middle',fontSize:11,fontWeight:600,
-            fill:'#9a9db4'}, 'Company '+lv.totalPct+'% · '+fmt(lv.totalCount)));
+            fill:'var(--chart-label)'}, 'Company '+lv.totalPct+'% · '+fmt(lv.totalCount)));
 
         return h('g',{key:'col'+li}, bars, companyTick, goal, xlab);
       })
@@ -206,4 +207,43 @@ function RegionProficiencyChart({data}){
   );
 }
 
-Object.assign(window,{TierTrack, RadarChart, LineChart, RegionProficiencyChart});
+/* ---------- Hollow donut (team badges by tier) ---------- */
+/* segments = [{name,color,value}]. Renders a hollow ring (one arc per segment),
+   the total in the center, per-segment counts around the ring, and a color key
+   to the right. Handles the all-zero case (empty track + "0"). */
+function DonutChart({segments, centerValue, centerLabel, size=180}){
+  const cx=size/2, cy=size/2, sw=18, r=(size-sw)/2 - 2;
+  const C=2*Math.PI*r;
+  const total=segments.reduce((s,x)=>s+(x.value||0),0);
+
+  const arcs=[];
+  if(total>0){
+    let cum=0;
+    segments.forEach((seg,i)=>{
+      const v=seg.value||0;
+      if(v<=0) return;
+      const len=v/total*C;
+      arcs.push(h('circle',{key:'a'+i, cx, cy, r, fill:'none', stroke:seg.color,
+        strokeWidth:sw, strokeDasharray:`${len} ${C-len}`, strokeDashoffset:-cum, strokeLinecap:'butt'}));
+      cum+=len;
+    });
+  }
+
+  return h('div',{style:{display:'flex',alignItems:'center',gap:20,flexWrap:'wrap',justifyContent:'center'}},
+    h('svg',{viewBox:`0 0 ${size} ${size}`, width:size, height:size, style:{overflow:'visible',flex:'0 0 auto'}},
+      h('circle',{cx,cy,r,fill:'none',stroke:'var(--surface-3)',strokeWidth:sw}),
+      h('g',{transform:`rotate(-90 ${cx} ${cy})`}, arcs),
+      h('text',{x:cx,y:cy-2,textAnchor:'middle',fontSize:30,fontWeight:800,fill:'var(--ink)'}, _fmtNum(centerValue)),
+      centerLabel ? h('text',{x:cx,y:cy+18,textAnchor:'middle',fontSize:12,fontWeight:600,fill:'var(--muted)'}, centerLabel) : null
+    ),
+    // color key
+    h('div',{style:{display:'flex',flexDirection:'column',gap:10,minWidth:110}},
+      segments.map((seg,i)=>h('div',{key:i,style:{display:'flex',alignItems:'center',gap:9,fontSize:12.5,fontWeight:700,color:'var(--ink-soft)'}},
+        h('span',{style:{width:11,height:11,borderRadius:'50%',background:seg.color,flex:'0 0 auto'}}),
+        h('span',{style:{flex:1}}, seg.name),
+        h('span',{style:{fontWeight:800,color:'var(--ink)'}}, _fmtNum(seg.value||0)))))
+  );
+}
+function _fmtNum(n){ return Math.round(n||0).toLocaleString(); }
+
+Object.assign(window,{TierTrack, RadarChart, LineChart, RegionProficiencyChart, DonutChart});

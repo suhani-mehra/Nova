@@ -74,20 +74,6 @@ function TeamLeaderboard({rows}){
   );
 }
 
-/* ---------- Badges by tier (REAL, horizontal bars) ---------- */
-function BadgesByTier({byTier}){
-  const order=['platinum','diamond','gold','silver','bronze'];
-  const rows=order.map(k=>({key:k, name:(tierByKey(k)||{}).name||k, color:(tierByKey(k)||{}).color||'#9aa2b1', val:byTier[k]||0}));
-  const max=Math.max(1,...rows.map(r=>r.val));
-  return h('div',{style:{display:'flex',flexDirection:'column',justifyContent:'space-around',flex:1,minHeight:0,gap:12}},
-    rows.map((b,i)=>h('div',{key:i,style:{display:'flex',alignItems:'center',gap:12}},
-      h('div',{style:{width:66,fontSize:12.5,fontWeight:700,color:'var(--ink-soft)',display:'flex',alignItems:'center',gap:6}},
-        h('span',{style:{width:9,height:9,borderRadius:'50%',background:b.color,flex:'0 0 auto'}}), b.name),
-      h('div',{className:'bar-wide',style:{flex:1}}, h('i',{style:{width:(b.val/max*100)+'%',background:b.color}})),
-      h('div',{style:{width:40,textAlign:'right',fontWeight:800,fontSize:13.5}}, _fmtN(b.val))))
-  );
-}
-
 /* ---------------- OVERVIEW (exec managers only) ---------------- */
 function MgrOverview(){
   const M=NOVA.manager;
@@ -205,31 +191,41 @@ function MgrYourTeam(){
 
   const radar=T.radar;
   const badges=T.badges||{total:0,avgPerPerson:0,thisMonthCount:0,byTier:{}};
+  const active=T.activeThisWeek||{count:0,total:T.size,pct:0};
+  const coursesThisWeek=T.coursesThisWeek||0;
 
   return h('div',{className:'page'},
     h('div',{className:'page-head'},
       h('h1',{className:'greeting'},'Your Team'),
       h('div',{className:'sub'},`Your direct reports · ${T.size} ${T.size===1?'person':'people'} — proficiency, badges, and streaks.`)),
 
-    // top row: radar + badges
-    h('div',{className:'mgr-cols', style:{marginBottom:22}},
-      h('div',{className:'mgr-col-main card'},
+    // top row: radar + badges donut (left) · active learners (right)
+    h('div',{className:'mgr-cols mgr-team-top', style:{marginBottom:22}},
+      h('div',{className:'card mgr-team-radar'},
         h('div',{className:'card-title'},'Team Average Proficiency'),
         h('div',{className:'card-sub'},'Mean proficiency across your team in each skill category.'),
-        radar ? h(RadarChart,{axes:radar.axes, thisMonth:_mgrRadarShift(radar.this_month), lastMonth:_mgrRadarShift(radar.last_month), size:300})
+        radar ? h(RadarChart,{axes:radar.axes, thisMonth:_mgrRadarShift(radar.this_month), lastMonth:_mgrRadarShift(radar.last_month), labelValues:radar.this_month, size:280})
               : h('div',{style:{padding:'40px 0',textAlign:'center',color:'var(--muted)',fontWeight:600}},'No skill data yet.'),
         h('div',{className:'chart-legend', style:{justifyContent:'center',marginTop:8}},
           h('div',{className:'it'}, h('span',{style:{width:14,height:14,borderRadius:4,background:'#A634FF',display:'inline-block'}}),'This month'),
           h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#2ACCFF'}}),'Last month'))),
-      h('div',{className:'mgr-col-rail'},
-        h('div',{className:'hero-card hero-blue'},
-          h('div',{className:'hero-lab'}, '🎖', 'Badges accumulated by your team'),
-          h('div',{className:'hero-num'}, _fmtN(badges.total)),
-          h('div',{className:'hero-sub'}, `Across ${T.size} ${T.size===1?'person':'people'} · avg ${badges.avgPerPerson} each · `,
-            h('b',null, (badges.thisMonthCount>=0?'+':'')+badges.thisMonthCount+' this month'))),
-        h('div',{className:'card', style:{flex:1,display:'flex',flexDirection:'column'}},
-          h('div',{className:'card-title', style:{fontSize:16,marginBottom:16}},'Badges by tier'),
-          h(BadgesByTier,{byTier:badges.byTier})))
+      h('div',{className:'card mgr-team-badges', style:{display:'flex',flexDirection:'column'}},
+        h('div',{className:'card-title', style:{marginBottom:6}},'Badges by tier'),
+        h('div',{className:'card-sub', style:{marginBottom:16}},'Every badge your team has earned.'),
+        h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center'}},
+          h(DonutChart,{
+            segments:['platinum','diamond','gold','silver','bronze'].map(k=>({
+              name:(tierByKey(k)||{}).name||k, color:(tierByKey(k)||{}).color||'#9aa2b1', value:badges.byTier[k]||0})),
+            centerValue:badges.total, centerLabel:'badges', size:180}))),
+      h('div',{className:'mgr-team-rail'},
+        h('div',{className:'hero-card hero-purple hero-compact'},
+          h('div',{className:'hero-lab'}, Icons.users({size:16,color:'#fff'}), 'Active learners this week'),
+          h('div',{className:'hero-num hero-num-sm'}, _fmtN(active.count)),
+          h('div',{className:'hero-sub'}, `${active.pct.toFixed(1)}% of ${active.total} direct report${active.total===1?'':'s'}`)),
+        h('div',{className:'hero-card hero-blue hero-fill'},
+          h('div',{className:'hero-lab'}, Icons.book({size:16,color:'#fff'}), 'Courses completed this week'),
+          h('div',{className:'hero-num hero-num-sm'}, _fmtN(coursesThisWeek)),
+          h('div',{className:'hero-sub'}, `across ${active.total} direct report${active.total===1?'':'s'}`)))
     ),
 
     // people table

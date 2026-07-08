@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -50,6 +50,8 @@ async def lifespan(app: FastAPI):
     init_tier_scores_table()
     from nova_db.badges import init_badges_table
     init_badges_table()
+    from nova_db.user_settings import init_user_settings_table
+    init_user_settings_table()
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, _test_fabric_connection)
@@ -254,7 +256,9 @@ def me(user: CurrentUser = Depends(get_current_user)):
     Dev mode (AZURE_TENANT_ID=placeholder): returns stub user without hitting DB.
     Post-AD: resolves classmate_user_id → dim_employee_profile row.
     """
+    from nova_db.user_settings import get_color_mode
     is_exec_manager = manager._is_exec_manager(user)
+    color_mode = get_color_mode(user.classmate_user_id) if user.classmate_user_id else "light"
 
     if user.classmate_user_id is None:
         # Production path before Classmate user lookup is wired
@@ -264,6 +268,7 @@ def me(user: CurrentUser = Depends(get_current_user)):
             "email":            user.email,
             "role":             user.role,
             "is_exec_manager":  is_exec_manager,
+            "color_mode":       color_mode,
             "department_code":  None,
             "designation_code": None,
             "employee_id":      None,
@@ -285,6 +290,7 @@ def me(user: CurrentUser = Depends(get_current_user)):
             "email":            p["email_id"],
             "role":             user.role,
             "is_exec_manager":  is_exec_manager,
+            "color_mode":       color_mode,
             "department_code":  p["department"],
             "designation_code": p["designation"],
             "employee_id":      p["employee_id"],
@@ -298,11 +304,26 @@ def me(user: CurrentUser = Depends(get_current_user)):
         "email":            user.email,
         "role":             user.role,
         "is_exec_manager":  is_exec_manager,
+        "color_mode":       color_mode,
         "department_code":  None,
         "designation_code": None,
         "employee_id":      None,
         "manager_id":       None,
     }
+
+
+@app.post("/api/me/color-mode")
+def set_me_color_mode(payload: dict, user: CurrentUser = Depends(get_current_user)):
+    """Persist the current account's light/dark preference."""
+    from datetime import datetime, timezone
+    from nova_db.user_settings import set_color_mode
+    if user.classmate_user_id is None:
+        raise HTTPException(status_code=503, detail="No user identity")
+    mode = (payload or {}).get("mode")
+    if mode not in ("light", "dark"):
+        raise HTTPException(status_code=400, detail="mode must be 'light' or 'dark'")
+    set_color_mode(user.classmate_user_id, mode, datetime.now(timezone.utc).isoformat())
+    return {"ok": True, "color_mode": mode}
 
 
 # Serve frontend — must come after all API routes.

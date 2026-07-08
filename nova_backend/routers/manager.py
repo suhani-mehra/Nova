@@ -389,6 +389,66 @@ def _get_company_active_this_week() -> int:
     return int(rows[0]["n"] or 0) if rows else 0
 
 
+def _get_team_active_this_week(uids: list) -> int:
+    """
+    Active learners this week within a specific set of users (a manager's direct
+    reports). Same 3-source activity union as `_get_company_active_this_week()`
+    but scoped to `uids`. Returns 0 for an empty list (avoids `IN ()`).
+    """
+    if not uids:
+        return 0
+    monday = date.today() - timedelta(days=date.today().weekday())
+    sunday = monday + timedelta(days=6)
+    ph = ",".join("?" * len(uids))
+    rows = _query(
+        f"""
+        SELECT COUNT(DISTINCT src.user_id) AS n
+        FROM (
+            SELECT user_id
+            FROM classmate.fact_classmate_learning_credit
+            WHERE is_deleted = 0 AND duration > 0
+              AND credit_date >= ? AND credit_date <= ?
+            UNION
+            SELECT user_id
+            FROM classmate.fact_classmate_user_skill_status
+            WHERE is_deleted = 0 AND is_active = 1
+              AND CAST(modified_on AS DATE) >= ? AND CAST(modified_on AS DATE) <= ?
+            UNION
+            SELECT user_id
+            FROM classmate.fact_classmate_self_study
+            WHERE status = 2 AND is_deleted = 0
+              AND attended_date >= ? AND attended_date <= ?
+        ) src
+        WHERE src.user_id IN ({ph})
+        """,
+        (monday, sunday, monday, sunday, monday, sunday, *uids),
+    )
+    return int(rows[0]["n"] or 0) if rows else 0
+
+
+def _get_team_courses_completed_this_week(uids: list) -> int:
+    """
+    Count of course completions this week among a set of users (a manager's
+    direct reports). Returns 0 for an empty list.
+    """
+    if not uids:
+        return 0
+    monday = date.today() - timedelta(days=date.today().weekday())
+    sunday = monday + timedelta(days=6)
+    ph = ",".join("?" * len(uids))
+    rows = _query(
+        f"""
+        SELECT COUNT(*) AS n
+        FROM classmate.vw_classmate_trainings
+        WHERE status = 4052
+          AND completed_on >= ? AND completed_on <= ?
+          AND user_id IN ({ph})
+        """,
+        (monday, sunday, *uids),
+    )
+    return int(rows[0]["n"] or 0) if rows else 0
+
+
 def _get_company_avg_credits_this_quarter() -> float:
     rows = _query("""
         SELECT AVG(s.credits) AS avg_c FROM (
@@ -1566,7 +1626,7 @@ def _overlay_current_tiers(employees: list) -> list:
 
 def _compute_your_team(mgr_id: int) -> dict:
     """Team radar + badge summary for a manager's direct reports. Writes its own
-    cache (key your_team_{mgr_id}) so it can be served via _swr."""
+    cache (key your_team_v3_{mgr_id}) so it can be served via _swr."""
     from services.skill_service import get_team_skill_radar
     from nova_db.badges import get_team_badge_summary
     from nova_db.gpt_cache import set_cache
@@ -1580,8 +1640,14 @@ def _compute_your_team(mgr_id: int) -> dict:
     badge_summary = get_team_badge_summary(uids)
     badge_summary["avg_per_person"] = round(badge_summary["total"] / n, 1) if n else 0.0
 
-    result = {"team_size": n, "radar": radar, "badges": badge_summary}
-    set_cache(f"your_team_{mgr_id}", result, "computed", ttl_hours=25)
+    result = {
+        "team_size": n,
+        "radar": radar,
+        "badges": badge_summary,
+        "active_this_week": _get_team_active_this_week(uids),
+        "courses_this_week": _get_team_courses_completed_this_week(uids),
+    }
+    set_cache(f"your_team_v3_{mgr_id}", result, "computed", ttl_hours=25)
     return result
 
 
@@ -1603,8 +1669,8 @@ async def manager_your_team(
     try:
         employees = await _run(_build_people_list, mgr_id, filter)
         employees = await _run(_overlay_current_tiers, employees)
-        extras    = _swr(f"your_team_{mgr_id}", partial(_compute_your_team, mgr_id),
-                         {"team_size": 0,
+        extras    = _swr(f"your_team_v3_{mgr_id}", partial(_compute_your_team, mgr_id),
+                         {"team_size": 0, "active_this_week": 0, "courses_this_week": 0,
                           "radar": {"axes": ["AI", "Cloud", "Frontend", "Backend", "Data"],
                                     "this_month": [0.0] * 5, "last_month": [0.0] * 5},
                           "badges": {"total": 0, "avg_per_person": 0.0, "this_month_count": 0,
@@ -1615,9 +1681,12 @@ async def manager_your_team(
         raise HTTPException(status_code=503, detail="Data unavailable")
 
     return {
-        "employees": employees,
-        "radar":     extras["radar"],
-        "badges":    extras["badges"],
+        "employees":         employees,
+        "radar":             extras["radar"],
+        "badges":            extras["badges"],
+        "active_this_week":  extras.get("active_this_week", 0),
+        "courses_this_week": extras.get("courses_this_week", 0),
+        "team_size":         extras.get("team_size", len(employees)),
     }
 
 

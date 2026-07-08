@@ -15,6 +15,7 @@ function LogoMark(){
 
 function ProfileMenu({account, onSwitch}){
   const [open,setOpen]=useState(false);
+  const [theme,setTheme]=useState((document.documentElement.dataset.theme==='dark')?'dark':'light');
   const ref=useRef(null);
   const a = NOVA.accounts[account] || NOVA.accounts.current || {};
   const kind = account;
@@ -23,6 +24,17 @@ function ProfileMenu({account, onSwitch}){
     const onDoc=e=>{ if(ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener('mousedown',onDoc); return ()=>document.removeEventListener('mousedown',onDoc);
   },[]);
+
+  const toggleTheme=()=>{
+    const next = theme==='dark' ? 'light' : 'dark';
+    setTheme(next);
+    if(typeof applyTheme==='function') applyTheme(next);            // stamp <html> + cache
+    if(NOVA.accounts) {                                             // keep account objects in sync
+      NOVA.accounts.colorMode=next;
+      ['employee','manager','current'].forEach(k=>{ if(NOVA.accounts[k]) NOVA.accounts[k].colorMode=next; });
+    }
+    if(typeof saveColorMode==='function') saveColorMode(next);      // persist to backend
+  };
 
   // Only show switch-account option when there's a distinct other account
   const otherKind = kind === 'employee' ? 'manager' : kind === 'manager' ? 'employee' : null;
@@ -44,7 +56,9 @@ function ProfileMenu({account, onSwitch}){
           h('div',{className:'em'},a.email),
           h('span',{className:`role-chip ${badgeCls}`,style:{marginTop:6}}, badgeLabel))),
       h('div',{className:'sep'}),
-      h('button',{className:'menu-item'}, h('span',{className:'ic'},Icons.settings({size:17})),'Account settings'),
+      h('button',{className:'menu-item', onClick:toggleTheme},
+        h('span',{className:'ic'}, (theme==='dark'?Icons.sun:Icons.moon)({size:17})),
+        theme==='dark' ? 'Switch to light mode' : 'Switch to dark mode'),
       h('button',{className:'menu-item', onClick:()=>typeof novaSignOut === 'function' && novaSignOut()}, h('span',{className:'ic'},Icons.logout({size:17})),'Sign out'),
       otherA && h(React.Fragment,null,
         h('div',{className:'sep'}),
