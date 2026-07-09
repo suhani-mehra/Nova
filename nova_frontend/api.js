@@ -76,7 +76,7 @@ const TIER_META = {
   bronze:   { name: 'Bronze',   color: '#e08531', tile: ['#e08531', '#b85e1a'] },
   silver:   { name: 'Silver',   color: '#7EC8E3', tile: ['#7EC8E3', '#4FA8C9'] },
   gold:     { name: 'Gold',     color: '#f5b71e', tile: ['#f5b71e', '#e08531'] },
-  diamond:  { name: 'Diamond',  color: '#0a2473', tile: ['#0a2473', '#5400DC'] },
+  diamond:  { name: 'Diamond',  color: '#4632d4', tile: ['#4632d4', '#5400DC'] },
   platinum: { name: 'Platinum', color: '#A634FF', tile: ['#A634FF', '#FF4398'] },
 };
 
@@ -241,9 +241,7 @@ function _mapPersonRow(e) {
 function mapOverview(data) {
   const total          = data.kpis.total_team;
   const activeWeek     = data.kpis.active_this_week ?? 0;
-  const activeTrendPct = data.kpis.active_week_trend_pct ?? 0;
   const activePct      = total ? (activeWeek / total * 100) : 0;
-  const _sign = n => n >= 0 ? '+' : '';
 
   return {
     total,
@@ -259,10 +257,8 @@ function mapOverview(data) {
       count:    activeWeek,
       pct:      activePct,
       total,
-      trendPct: activeTrendPct,
-      trendStr: _sign(activeTrendPct) + Math.round(activeTrendPct) + '% vs last week',
     },
-    // Real per-department proficiency (name + %), sorted best-first by backend.
+    // Per-manager team skill average (name + %), sorted best-first by backend.
     teamLeaderboard: (data.team_leaderboard || []).map(t => ({
       name: t.name,
       prof: Math.round(t.prof),

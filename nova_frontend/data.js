@@ -10,7 +10,7 @@
     {key:'bronze',   name:'Bronze',   color:'#e08531'},
     {key:'silver',   name:'Silver',   color:'#7EC8E3'},
     {key:'gold',     name:'Gold',     color:'#f5b71e'},
-    {key:'diamond',  name:'Diamond',  color:'#0a2473'},
+    {key:'diamond',  name:'Diamond',  color:'#4632d4'},
     {key:'platinum', name:'Platinum', color:'#A634FF'},
   ];
 

@@ -28,7 +28,7 @@ router = APIRouter()
 _executor = ThreadPoolExecutor(max_workers=8)
 
 _trend_computing = False          # guard against concurrent AI trend recomputes
-_dept_snapshot_computing = False  # guard against concurrent dept snapshot recomputes
+_team_snapshot_computing = False  # guard against concurrent team snapshot recomputes
 _swr_inflight: set = set()        # cache keys with a background recompute in flight
 
 
@@ -295,7 +295,6 @@ _PLACEHOLDER_OVERVIEW = {
         "retention_rate_trend_pct": 0.0,
         "retention_rate_trend_dir": "flat",
         "ai_proficiency_trend_pts": 0.0,
-        "active_week_trend_pct":    0.0,
         "at_risk_count_company":    0,
         "at_risk_count_trend_pct":  0.0,
         "at_risk_count_trend_dir":  "flat",
@@ -478,11 +477,6 @@ def _get_company_avg_credits_this_quarter() -> float:
 def _compute_company_overview_stats() -> dict:
     """
     Bundles the company-wide overview metrics into one cached call.
-
-    The "active learners this week" trend compares the current streak-based count
-    against a weekly baseline (company_active_prev) — the same pattern used by the
-    at-risk count — since the streak cache only knows about the current week and
-    can't be diffed against a prior week directly.
     """
     from nova_db.gpt_cache import get_cache, set_cache
     CACHE_KEY = "company_overview_stats"
@@ -494,23 +488,9 @@ def _compute_company_overview_stats() -> dict:
         active_week = _get_company_active_this_week()
         avg_credits = _get_company_avg_credits_this_quarter()
 
-        # Active-learners trend vs a weekly baseline (only set when absent; it
-        # expires after 7 days and the next run re-baselines).
-        prev_snap = get_cache("company_active_prev")
-        if prev_snap is not None:
-            prev_count = int(prev_snap["result"])
-            trend_pct  = round((active_week - prev_count) / max(prev_count, 1) * 100, 1)
-            trend_dir  = "up" if trend_pct > 0 else "down" if trend_pct < 0 else "flat"
-        else:
-            trend_pct = 0.0
-            trend_dir = "flat"
-            set_cache("company_active_prev", active_week, "computed", ttl_hours=24 * 7)
-
         result = {
             "headcount":                headcount,
             "active_this_week":         active_week,
-            "active_week_trend_pct":    trend_pct,
-            "active_week_trend_dir":    trend_dir,
             "avg_credits_this_quarter": avg_credits,
         }
         set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
@@ -519,7 +499,6 @@ def _compute_company_overview_stats() -> dict:
         logger.warning("_compute_company_overview_stats failed: %s", exc)
         return {
             "headcount": 0, "active_this_week": 0,
-            "active_week_trend_pct": 0.0, "active_week_trend_dir": "flat",
             "avg_credits_this_quarter": 0.0,
         }
 
@@ -862,134 +841,102 @@ def _default_quarterly_trend() -> list:
     return quarters
 
 
-def _compute_dept_snapshot() -> list:
+def _compute_manager_team_snapshot() -> list:
     """
-    Computes per-department AI proficiency % for all active employees.
-    Cached 24 h under key "dept_snapshot". Runs at startup.
+    Computes each manager's team average skill score (mean of all 5 skill
+    verticals, averaged across the manager's direct reports) for the Team
+    Leaderboard. A "team" = the direct reports of one manager. Cached 25 h under
+    key "team_leaderboard_by_manager". Runs at startup.
     """
-    global _dept_snapshot_computing
-    from nova_db.gpt_cache import get_cache, get_cache_stale, set_cache
-    from core.queries import _DEDUP_CTE
+    global _team_snapshot_computing
+    from nova_db.gpt_cache import get_cache, set_cache
+    from core.queries import _DEDUP_CTE, get_employee_profile
 
-    CACHE_KEY = "dept_snapshot"
-    BASELINE_KEY = "dept_ai_baseline"
-    BASELINE_WINDOW_DAYS = 30
+    CACHE_KEY = "team_leaderboard_by_manager"
     cached = get_cache(CACHE_KEY)
     if cached:
-        _dept_snapshot_computing = False
+        _team_snapshot_computing = False
         return cached["result"]
 
-    _dept_snapshot_computing = True
-    logger.info("dept_snapshot: computing company-wide department AI proficiency")
+    _team_snapshot_computing = True
+    logger.info("team_leaderboard: computing per-manager team skill averages")
 
     try:
         emp_rows = _query(
             _DEDUP_CTE + """
-            SELECT user_id, LOWER(TRIM(department_code)) AS dept
+            SELECT user_id, manager
             FROM latest_profiles
-            WHERE rn=1 AND user_id IS NOT NULL AND department_code IS NOT NULL
+            WHERE rn=1 AND user_id IS NOT NULL AND manager IS NOT NULL
             """
         )
     except Exception as exc:
-        logger.warning("dept_snapshot: employee query failed: %s", exc)
-        _dept_snapshot_computing = False
+        logger.warning("team_leaderboard: employee query failed: %s", exc)
+        _team_snapshot_computing = False
         return []
 
     if not emp_rows:
-        _dept_snapshot_computing = False
+        _team_snapshot_computing = False
         return []
 
-    dept_uids: dict = defaultdict(list)
+    # Group direct reports under each manager.
+    mgr_uids: dict = defaultdict(list)
     all_uid_list: list = []
     for r in emp_rows:
-        dept_uids[r["dept"]].append(r["user_id"])
+        mgr_uids[r["manager"]].append(r["user_id"])
         all_uid_list.append(r["user_id"])
 
-    # Read AI scores from gpt_cache first, then batch-compute uncached
-    uid_ai: dict = {}
+    # Per-employee skill score = mean of the 5 normalized axis scores (the same
+    # building block used as tier_score's skill component). Read from the warm
+    # classify_{uid} cache first, then batch-compute any misses.
+    uid_skill: dict = {}
     uncached_uids: list = []
     for uid in all_uid_list:
         c = get_cache(f"classify_{uid}")
         if c:
             res = c.get("result", {})
-            axes = res.get("axes", ["AI", "Cloud", "Frontend", "Backend", "Data"])
             this_month = res.get("this_month", [])
-            try:
-                ai_idx = axes.index("AI")
-                uid_ai[uid] = float(this_month[ai_idx]) if ai_idx < len(this_month) else 0.0
-            except (ValueError, IndexError):
-                uid_ai[uid] = 0.0
+            uid_skill[uid] = round(sum(this_month) / len(this_month), 1) if this_month else 0.0
         else:
             uncached_uids.append(uid)
 
     if uncached_uids:
         try:
-            from services.skill_service import get_team_skill_scores
+            from services.skill_service import get_team_skill_scores, AXES
             BATCH = 500
             for i in range(0, len(uncached_uids), BATCH):
                 batch = uncached_uids[i: i + BATCH]
                 team_norm = get_team_skill_scores(batch)
                 for uid in batch:
-                    uid_ai[uid] = round(team_norm.get(uid, {}).get("AI", 0.0), 1)
+                    axis_scores = team_norm.get(uid, {})
+                    vals = [float(axis_scores.get(ax, 0.0)) for ax in AXES]
+                    uid_skill[uid] = round(sum(vals) / len(vals), 1) if vals else 0.0
         except Exception as exc:
-            logger.warning("dept_snapshot: skill scores failed for uncached batch: %s", exc)
+            logger.warning("team_leaderboard: skill scores failed for uncached batch: %s", exc)
             for uid in uncached_uids:
-                uid_ai.setdefault(uid, 0.0)
-
-    threshold = settings.ai_proficiency_min_score
+                uid_skill.setdefault(uid, 0.0)
 
     result = []
-    for dept, uids_in_dept in dept_uids.items():
-        proficient = sum(1 for uid in uids_in_dept if uid_ai.get(uid, 0) >= threshold)
-        pct = round(proficient / len(uids_in_dept) * 100, 1) if uids_in_dept else 0.0
+    for mgr_id, uids_in_team in mgr_uids.items():
+        if not uids_in_team:
+            continue
+        avg_skill = round(sum(uid_skill.get(uid, 0.0) for uid in uids_in_team) / len(uids_in_team), 1)
+        try:
+            prof = get_employee_profile(None, mgr_id)
+            name = prof[0]["name"] if prof and prof[0].get("name") else f"Manager {mgr_id}"
+        except Exception:
+            name = f"Manager {mgr_id}"
         result.append({
-            "dept":              dept,
-            "headcount":         len(uids_in_dept),
-            "ai_proficient_pct": pct,
-            "trend_pct":         0.0,   # filled from the period baseline below
+            "name":          name,
+            "headcount":     len(uids_in_team),
+            "avg_skill_pct": avg_skill,
         })
 
-    # Trend = change vs a period-stable baseline. The baseline only refreshes
-    # every BASELINE_WINDOW_DAYS (so the trend is an honest change-over-a-month,
-    # not a day-over-day delta) and is NEVER seeded from a degenerate run
-    # (nobody proficient — e.g. a cold cache), which previously produced a
-    # spurious "trend == pct".
-    total_proficient = sum(1 for uid in uid_ai if uid_ai.get(uid, 0) >= threshold)
-    today = date.today()
-    baseline = get_cache_stale(BASELINE_KEY)
-    baseline_pcts: dict = {}
-    baseline_fresh = False
-    if baseline:
-        res = baseline.get("result") or {}
-        baseline_pcts = res.get("pcts", {}) or {}
-        try:
-            captured = date.fromisoformat(res.get("captured_at", ""))
-            baseline_fresh = (today - captured).days < BASELINE_WINDOW_DAYS
-        except Exception:
-            baseline_fresh = False
-
-    # Only show a delta once a baseline exists; otherwise 0 (no spurious jump).
-    if baseline_pcts:
-        for d in result:
-            d["trend_pct"] = round(
-                d["ai_proficient_pct"] - baseline_pcts.get(d["dept"], d["ai_proficient_pct"]), 1)
-
-    result.sort(key=lambda x: x["ai_proficient_pct"], reverse=True)
-
-    # (Re)seed the baseline only from a non-degenerate snapshot, and only when
-    # it's missing or older than the window.
-    if total_proficient > 0 and (not baseline_pcts or not baseline_fresh):
-        set_cache(
-            BASELINE_KEY,
-            {"pcts": {d["dept"]: d["ai_proficient_pct"] for d in result},
-             "captured_at": today.isoformat()},
-            "computed", ttl_hours=24 * 60,
-        )
+    result.sort(key=lambda x: x["avg_skill_pct"], reverse=True)
 
     set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
 
-    logger.info("dept_snapshot: complete — %d departments", len(result))
-    _dept_snapshot_computing = False
+    logger.info("team_leaderboard: complete — %d manager teams", len(result))
+    _team_snapshot_computing = False
     return result
 
 
@@ -1056,8 +1003,7 @@ def _compute_ai_proficiency_by_region() -> dict:
         all_uid_list.append(uid)
 
     # Read AI scores from gpt_cache first, then batch-compute the uncached —
-    # identical warm-cache path to _compute_dept_snapshot so scoring logic is
-    # never duplicated.
+    # same warm-cache path used elsewhere so scoring logic is never duplicated.
     uid_ai: dict = {}
     uncached_uids: list = []
     for uid in all_uid_list:
@@ -1377,7 +1323,6 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
         overview_stats = _swr(
             "company_overview_stats", _compute_company_overview_stats,
             {"headcount": 0, "active_this_week": 0,
-             "active_week_trend_pct": 0.0, "active_week_trend_dir": "flat",
              "avg_credits_this_quarter": 0.0},
         )
         retention = _swr(
@@ -1416,9 +1361,6 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
             ai_prof_count = 0
             ai_trend_pts  = 0.0
 
-        active_trend_pct = overview_stats.get("active_week_trend_pct", 0.0)
-        active_trend_dir = overview_stats.get("active_week_trend_dir", "flat")
-
         at_risk_count_num  = at_risk_count.get("count", 0)
         at_risk_trend_pct  = at_risk_count.get("trend_pct", 0.0)
         at_risk_trend_dir  = at_risk_count.get("trend_dir", "flat")
@@ -1432,12 +1374,12 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
             _default_region_snapshot(),
         )
 
-        # Team Leaderboard = per-department AI proficiency (name + % only),
-        # sourced from the same dept_snapshot cache that backed the old Teams
-        # page. Sorted best-first; empty list until the snapshot is warm.
-        dept_snap = _swr("dept_snapshot", _compute_dept_snapshot, [])
+        # Team Leaderboard = per-manager team skill average (name + % only),
+        # each team being one manager's direct reports scored on the mean of all
+        # 5 skill verticals. Sorted best-first; empty list until the snapshot is warm.
+        mgr_snap = _swr("team_leaderboard_by_manager", _compute_manager_team_snapshot, [])
         team_leaderboard = sorted(
-            [{"name": d["dept"], "prof": d["ai_proficient_pct"]} for d in dept_snap],
+            [{"name": m["name"], "prof": m["avg_skill_pct"]} for m in mgr_snap],
             key=lambda x: x["prof"], reverse=True,
         )
 
@@ -1456,8 +1398,6 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
             "retention_rate_trend_pct": retention["trend_pct"],
             "retention_rate_trend_dir": retention["trend_dir"],
             "ai_proficiency_trend_pts": ai_trend_pts,
-            "active_week_trend_pct":    active_trend_pct,
-            "active_week_trend_dir":    active_trend_dir,
             "at_risk_count_company":    at_risk_count_num,
             "at_risk_count_trend_pct":  at_risk_trend_pct,
             "at_risk_count_trend_dir":  at_risk_trend_dir,
