@@ -74,9 +74,9 @@ function _nameToGrad(name) {
 const TIER_META = {
   starter:  { name: 'Starter',  color: '#9aa2b1', tile: ['#9aa2b1', '#6b7280'] },
   bronze:   { name: 'Bronze',   color: '#e08531', tile: ['#e08531', '#b85e1a'] },
-  silver:   { name: 'Silver',   color: '#9aa3af', tile: ['#9aa3af', '#6b7280'] },
+  silver:   { name: 'Silver',   color: '#7EC8E3', tile: ['#7EC8E3', '#4FA8C9'] },
   gold:     { name: 'Gold',     color: '#f5b71e', tile: ['#f5b71e', '#e08531'] },
-  diamond:  { name: 'Diamond',  color: '#2ACCFF', tile: ['#2ACCFF', '#5400DC'] },
+  diamond:  { name: 'Diamond',  color: '#0a2473', tile: ['#0a2473', '#5400DC'] },
   platinum: { name: 'Platinum', color: '#A634FF', tile: ['#A634FF', '#FF4398'] },
 };
 
@@ -171,7 +171,7 @@ function mapTeam(data) {
       meta:  recSource === 'fallback'
                ? 'Based on your learning'
                : `Completed by ${c.completion_count} teammate${c.completion_count === 1 ? '' : 's'}`,
-      match: Math.max(60, 92 - i * 8),
+      match: (c.match_pct != null) ? c.match_pct : Math.max(60, 92 - i * 8),
       tile:  _RECO_TILES[i % _RECO_TILES.length],
       glyph: (c.category || 'Ot').slice(0, 2),
     })),

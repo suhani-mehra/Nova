@@ -151,7 +151,7 @@ function MyEmployee(){
                 : 'Courses most of your team has completed.'),
             h('div',{style:{display:'flex',flexDirection:'column',gap:12,marginTop:14,flex:1,minHeight:0,overflowY:'auto',scrollbarWidth:'thin'}},
               TM.recommended.map((c,i)=>h('a',{className:'reco-card', key:i, href:classmateSearchUrl(c.name), target:'_blank', rel:'noopener noreferrer'},
-                h(CourseTile,{grad:c.tile, glyph:c.glyph, glyphSize:0.8}),
+                h(CourseTile,{grad:c.tile, glyph:(verticalIcon(c.cls) || c.glyph), glyphSize:0.8}),
                 h('div',{className:'body'},
                   h('div',{className:'nm'}, c.name, h('span',{className:`badge ${c.cls}`}, c.badge)),
                   h('div',{className:'meta'}, c.meta)),
@@ -174,6 +174,7 @@ function MyEmployee(){
             thisMonth:_radarShift(E.skills.thisMonth),
             lastMonth:_radarShift(E.skills.lastMonth),
             compareWith: compareUser ? _radarShift(compareUser.scores) : null,
+            labelValues:E.skills.thisMonth,
             size:300
           }),
           h('div',{className:'legend'},

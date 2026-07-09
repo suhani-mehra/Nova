@@ -15,9 +15,9 @@ It has two audiences, served from one app:
   (with the ability to send "congrats").
 - **Manager view — two tabs:**
   - **Overview** (company-wide, **exec managers only**): an AI-proficiency trend chart by
-    quarter with a second "by region" tab (four proficiency levels split by
-    Asia/North America/Europe/Other), a Proficiency-by-Vertical chart, an Active-learners-this-week
-    card, a Specialization Landscape, and a per-department Team Leaderboard.
+    quarter with a second "by region" tab (four proficiency levels split by Asia/North
+    America/Europe), a Proficiency-by-Vertical chart, an Active-learners-this-week card, a
+    Specialization Landscape, and a per-department Team Leaderboard.
   - **Your Team** (direct reports only, **any manager**): a team-average skill radar, a badges
     donut, active-learners + courses-completed this week, and a searchable people list with each
     person's tier, proficiency, and learning streak.
@@ -38,26 +38,40 @@ courses roll up into skill scores and a composite **tier**; tiers reset monthly 
 - **Frontend:** Vanilla React 18 via CDN + in-browser Babel (no build step). JSX files are
   transpiled in the browser. Served as static files by the same FastAPI app (mounted with a
   no-store cache header so edits show on reload). Lives in `nova_frontend/`.
-- **System of record:** **Microsoft Fabric Data Warehouse** (the "Classmate" schema),
-  accessed via `pyodbc` with an Azure AD access token. This is read-only source data,
-  refreshed nightly by an upstream ETL (~12–2 AM; last day of a month lands ~1 AM the next
-  day).
-- **Local cache / app state:** **SQLite** (`nova_backend/nova_local.db`) — holds all
-  computed/derived data so requests never wait on Fabric. Also stores app-owned data
-  (badges, congrats).
+- **System of record:** the **Classmate table-dump API** (APIM → Boomi → lakehouse,
+  `core/api_client.py`) — **no more direct Fabric/pyodbc connection.** The API is not a query
+  API: it only accepts `{tableName, pageNumber, pageSize}` and returns whole-table pages, so
+  there's no filtering/joins/aggregation at the source anymore. `nova_db/warehouse_sync.py`
+  pages through all 10 exposed tables and loads them into a **local SQLite warehouse**
+  (`nova_warehouse.db`) on a schedule (see §7); everything the app used to run as a live Fabric
+  query now runs as a normal SQL query against that local file. `core/database.py`'s
+  `query()`/`query_df()`/`get_connection()` interface is unchanged from the Fabric era — callers
+  didn't need to change — it just now opens a short-lived **read-only** connection to the local
+  warehouse file instead of a pyodbc/Fabric connection. The sync builds two derived
+  objects the raw API doesn't expose (`mv_employee_year_quarter_credits`,
+  `vw_classmate_certification`, mirroring the old Fabric views) and rebuilds them into a staging
+  file that's atomically swapped in with `os.replace()`, so an in-flight sync can never corrupt
+  a reader and there's no WAL/locking to worry about.
+- **Local cache / app state:** **SQLite** (`nova_backend/nova_local.db`, a *separate* file from
+  the warehouse above) — holds all computed/derived data (skill radars, tiers, trends, etc.) so
+  requests never wait on a recompute. Also stores app-owned data (badges, congrats, user
+  settings).
 - **LLM:** Azure OpenAI **gpt-4o-mini** — used to (a) grade courses on the 5 verticals and
   (b) pick a recommended course.
 - **Auth:** Azure AD (JWT bearer) in production; a **dev bypass** loads a fixed user
   locally.
 
-Data flow: **Fabric (raw activity) → Python computes scores/tiers/KPIs → SQLite cache →
-FastAPI endpoints → frontend mappers → `window.NOVA` → React views.**
+Data flow: **Classmate API → local SQLite warehouse (raw activity) → Python computes
+scores/tiers/KPIs → derived SQLite cache → FastAPI endpoints → frontend mappers → `window.NOVA`
+→ React views.**
 
 ---
 
-## 3. Source Data (Fabric "classmate" schema)
+## 3. Source Data ("classmate" schema, synced from the table-dump API)
 
-Key tables and the **status codes** that matter:
+These are the same table names/shapes as the old Fabric "classmate" schema (the API dumps the
+same lakehouse tables) — they just live in the local `nova_warehouse.db` now, not in Fabric
+itself. Key tables and the **status codes** that matter:
 
 - `vw_classmate_trainings` — course enrollments/completions. **`status = 4052` = completed**,
   **`status = 4035` = in progress**. Has `learning_credits`, `completed_on`,
@@ -68,11 +82,18 @@ Key tables and the **status codes** that matter:
 - `fact_classmate_user_skill_status` / `fact_classmate_self_study` — extra activity signals
   (used for "active day" detection; self-study **`status = 2` = attended**).
 - `dim_classmate_employee_profile` — org data (manager, department_code, designation,
-  display_name, `country_code`). This is a **slowly-changing dimension with many rows per
-  person**, so every read must deduplicate to the latest row per `user_id` (via a
+  display_name, `country_code`, `employee_id`). This is a **slowly-changing dimension with many
+  rows per person**, so every read must deduplicate to the latest row per `user_id` (via a
   `ROW_NUMBER() … ORDER BY modified_on DESC` CTE — the `_DEDUP_CTE`). Forgetting this fans out
   ~73k rows for ~13k people. `country_code` is a non-ISO Classmate code (e.g. `IND`, `SER`,
-  `UZKH`) — see `core/geo.py` for the confirmed mapping to region.
+  `UZKH`) — see `core/geo.py` for the confirmed mapping to region. **Placeholder/temp
+  employees** have an `employee_id` starting with `TMP` (these are the same rows that carried
+  `country_code = 'OT'` or a null country_code) — every query that builds an employee/user_id
+  population filters them out with `employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE
+  'TMP%'`, added alongside the existing `etl_isactive=1 AND is_active=1 AND is_deleted=0` filter
+  (in `_DEDUP_CTE` for most reads, and individually in the handful of raw queries that don't go
+  through it — e.g. `_compute_quarterly_ai_proficiency`, `get_team_highlights`,
+  `_get_direct_report_ids`). No employee with a TMP employee_id appears anywhere in Nova.
 - `dim_classmate_user` — identity (email/`aduser_name`, names).
 - `dim_classmate_second_level_category` / `dim_classmate_certificate` — the course/cert
   catalog (source of items to grade).
@@ -128,11 +149,14 @@ stale-while-revalidate), `set_cache(key, result, scored_by, ttl_hours)`,
   it via `POST /api/me/color-mode`. The frontend stamps `<html data-theme>` (see §8) and caches
   the last value in `localStorage` (`nova_theme`) for a flash-free boot before `/api/me`
   reconciles the authoritative account value.
-- **Fabric connection:** a single process-wide `InteractiveBrowserCredential` acquires an
-  Azure token (scope `https://database.windows.net/.default`); the token is injected into
-  `pyodbc.connect(..., attrs_before={1256: token_struct})`. Connections are per-thread and
-  refresh every 55 min (before the 60-min token expiry). `query()` retries transient
-  SQLSTATE errors (`08S01`, `08001`, `HYT00`, `HY000`) up to twice.
+- **Source data connection (no more Fabric/pyodbc):** `core/api_client.py` gets an OAuth
+  client-credentials token (cached until ~60s before expiry) and calls the Classmate table-dump
+  API with both that Bearer token **and** an APIM subscription key header. `fetch_table()` pages
+  through a table (`{tableName, pageNumber, pageSize}`), retrying transient HTTP failures and a
+  401 (drops the cached token and re-authenticates) up to 3 times with exponential backoff.
+  `nova_db/warehouse_sync.sync_all()` uses this to rebuild the local `nova_warehouse.db` (see §2,
+  §7); every backend query then runs as plain local SQLite via `core/database.py` — no per-request
+  network/auth round-trip to Fabric anymore.
 
 ---
 
@@ -174,6 +198,9 @@ axis_score = min(100, (raw_axis_sum / 5000) ^ 0.4 * 100)
 - Cached per user as `classify_{uid}`. A **`queries_ok` guard** prevents caching all-zero
   scores when a Fabric query fails transiently (which would otherwise poison the cache for
   24h).
+- The employee **Skill Growth** radar renders each axis's `this_month` value as a **per-axis %
+  label** under the axis name (via the `RadarChart` `labelValues` prop), matching the manager
+  "Your Team" radar.
 
 ### 6.3 AI proficiency
 
@@ -277,9 +304,22 @@ the first uncompleted catalog course if the LLM fails. Cached as `recommend_{uid
   last week" percentage (change in completions this week vs last).
 - **Accomplishments:** recent (last 14 days) completed courses by the person's team (peers +
   their own reports), each tagged with a vertical category.
-- **Recommended-for-you / most-completed:** most-completed team courses the user hasn't done,
-  with **training/compliance modules filtered out** (keyword list → all-zero vertical scores
-  → keyword classifier).
+- **Recommended-for-you / most-completed:** team courses the user hasn't done, with
+  **training/compliance modules filtered out** (keyword list → all-zero vertical scores →
+  keyword classifier), each carrying a real **`match_pct`** and a **vertical icon**. The match
+  score is computed with plain arithmetic (no LLM call) in `_score_reco_matches()` in
+  `routers/employee.py` by blending three signals: **teammate popularity** (`completion_count`
+  relative to the candidate set), **skill-gap fill** (the course's pre-graded 5-vertical vector
+  from `course_vertical_scores`, keyword-fallback for ungraded courses, weighted toward the
+  user's weakest radar axes), and **similarity** (cosine of that vector to the user's own
+  accumulated vertical profile). Skill-gap and similarity are structurally opposed (one rewards
+  weak axes, the other strong ones), so they're combined with `max()` rather than averaged —
+  `match_raw = 0.4*teammate + 0.6*max(skill_gap, similarity)` plus a small stable name-hash
+  tiebreak. The **full** filtered pool is scored, then min-max normalized into a **70–98%**
+  display band, sorted best-first, and the top 4 are returned (a final pass guarantees the 4
+  shown read as strictly-descending distinct %s). The frontend renders each course's vertical
+  as a FontAwesome icon (AI=robot, Cloud=cloud, Data=chart-pie, Frontend=palette, Backend=code;
+  `verticalIcon()` in `icons.jsx`), falling back to a 2-letter text glyph for "Other".
 
 ### 6.9 Manager Overview (company-wide, exec managers only)
 
@@ -302,17 +342,19 @@ is normalized with the same `^0.4` curve and compared to the `≥30` threshold; 
 line doesn't dip on partial data. Target line drawn at 80%.
 
 **AI-proficiency by region (By region tab):** a **grouped** bar chart, one group per proficiency
-level (Professional → Champion) with one bar per region (Asia / North America / Europe / Other).
-Each bar's height = **that region's own % proficient** at the level (independent of headcount, so
-a large region doesn't visually swamp the rest); a dashed line marks the company-wide goal and a
-solid grey tick marks the company-wide actual. `_compute_ai_proficiency_by_region()` reuses the
-same warm `classify_{uid}` AI-score cache as the dept snapshot (no rescoring), maps each
-employee's `country_code` to a region via `core/geo.py`, and counts per level/region. Region
-membership comes from real, confirmed Fabric data (no invented "unmapped" catch-all — every
-country_code present resolves to Asia/NA/Europe/Other per an explicit mapping agreed with the
-product owner, including a few judgment calls: Turkey→Asia, Russia/RF→Europe,
-Switzerland(`SWZ`)→Europe, Australia/null/`OT`→Other). Cached as `ai_proficiency_by_region`,
-same 25h TTL / nightly-recompute pattern as the trend chart.
+level (Professional → Champion) with one bar per region (Asia / North America / Europe — there
+is no "Other" bucket). Each bar's height = **that region's own % proficient** at the level
+(independent of headcount, so a large region doesn't visually swamp the rest); a dashed line
+marks the company-wide goal and a solid grey tick marks the company-wide actual.
+`_compute_ai_proficiency_by_region()` reuses the same warm `classify_{uid}` AI-score cache as the
+dept snapshot (no rescoring), maps each employee's `country_code` to a region via `core/geo.py`,
+and counts per level/region. Region membership comes from real, confirmed Fabric data, including
+a few judgment calls: Turkey→Asia, Russia/RF→Europe, Switzerland(`SWZ`)→Europe, Australia→Asia
+(folded in once the TMP/placeholder rows that used to share the "Other" bucket with it were
+excluded — see §3). `continent_for()` returns `None` for a null/genuinely-unmapped country_code
+and those employees are dropped from the region chart entirely rather than rendered as a
+catch-all bar. Cached as `ai_proficiency_by_region`, same 25h TTL / nightly-recompute pattern as
+the trend chart.
 
 **Team Leaderboard:** per-department AI proficiency (name + bar + %), sourced from the same
 `_compute_dept_snapshot()` cache (each department = % of members AI-proficient at `≥30`),
@@ -365,18 +407,24 @@ shows an all-time received count; the team view shows a 7-day team count.
 
 ## 7. Caching & refresh cycle
 
-Everything expensive is precomputed into SQLite; endpoints read cache and use
-**stale-while-revalidate** (return stale instantly, recompute in the background) so a request
-never blocks on Fabric.
+There are now **two layers** of local data: the **warehouse** (`nova_warehouse.db`, a synced
+copy of the raw source tables — see §2) and the **derived cache** (`nova_local.db`'s `gpt_cache`
+etc. — computed *from* the warehouse). Everything expensive is precomputed into the derived
+cache; endpoints read cache and use **stale-while-revalidate** (return stale instantly, recompute
+in the background) so a request never blocks on a recompute.
 
-- **Startup:** init all SQLite tables, test Fabric, then fire background jobs — prewarm skill
-  (`classify_*`) and streak caches, grade any unscored courses, compute company stats /
-  retention / at-risk / quarterly AI trend / department snapshot / AI-proficiency-by-region
-  snapshot, and refresh tier scores.
-- **Nightly at 03:00 UTC** (`_run_nightly_refresh`, after the upstream ETL): **[on the 1st]
-  award last month's badges →** force-refresh tier scores (current month) → prewarm skill &
-  streak → recompute company stats/trend/dept snapshot/region snapshot → clear & rebuild
-  per-manager caches.
+- **Startup:** ensure the warehouse is ready — if `nova_warehouse.db` already holds a completed
+  sync this is instant; on a genuinely cold start (no warehouse file yet) it blocks on a full
+  sync (~570k rows from the API) before anything else. Then: init all SQLite tables, then fire
+  background jobs — prewarm skill (`classify_*`) and streak caches, grade any unscored courses,
+  compute company stats / retention / at-risk / quarterly AI trend / department snapshot /
+  AI-proficiency-by-region snapshot, and refresh tier scores.
+- **Nightly at 03:00 UTC** (`_run_nightly_refresh`, after the upstream lakehouse ETL, ~12–2 AM):
+  **re-syncs the warehouse from the Classmate API first** (if this fails, caches simply rebuild
+  from the previous day's snapshot rather than blocking) → **[on the 1st] award last month's
+  badges →** force-refresh tier scores (current month) → prewarm skill & streak → recompute
+  company stats/trend/dept snapshot/region snapshot → clear & rebuild per-manager caches. A
+  manual re-sync is also available via `POST /api/admin/sync`.
 - **Typical TTLs:** most derived `gpt_cache` entries 24–25h; `user_tier_scores` 24h;
   `dept_ai_baseline` ~60 days; `course_vertical_scores` and app-owned tables persist.
 
@@ -403,7 +451,9 @@ costs LLM calls to rebuild) or the app-owned `user_badges` / `congrats`.
    loading/sign-in/error gating. Manager tabs are `Overview` + `Your Team`, and `Overview` is
    dropped from the list entirely when `NOVA.accounts.isExecManager` is false. `ProfileMenu`
    holds the light/dark toggle (calls `applyTheme` + `saveColorMode` from `api.js`).
-4. Views: **MyProgress** (tier card + badges, streak, skill radar, continue/recommended),
+4. Views: **MyProgress** (tier card + badges, streak, skill radar with per-axis % labels,
+   continue/recommended — the recommended-course cards show a per-vertical FontAwesome icon and
+   a real `match_pct`),
    **MyTeam** (highlights, accomplishments with congrats, team recommendations),
    **MgrOverview** (two-column: chart card with "Trend"/"By region" toggle + Proficiency-by-Vertical
    on the left; Active-learners hero + Specialization Landscape + Team Leaderboard on the
@@ -440,7 +490,8 @@ team.coursesThisWeek`, `color_mode → account.colorMode`, badge counts → donu
 | AI-proficient threshold | score ≥ **30** |
 | Proficiency levels (cumulative) | professional ≥30 / specialist ≥45 / expert ≥55 / champion ≥65 |
 | Proficiency level goals | professional 80% / specialist 50% / expert 35% / champion 20% |
-| Region mapping | `core/geo.py` — Asia/NA/Europe/Other from `country_code` |
+| Region mapping | `core/geo.py` — Asia/NA/Europe (no "Other") from `country_code` |
+| Placeholder-employee filter | `employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%'` |
 | Tier weights | credits .30 / skill .35 / consistency .20 / recency .15 |
 | Monthly credit target | **100** credits → credits_score 100 |
 | Tier percentile cutoffs | platinum 3 / diamond 10 / gold 20 / silver 40 / bronze 60 |
@@ -472,8 +523,19 @@ team.coursesThisWeek`, `color_mode → account.colorMode`, badge counts → donu
 6. **Skill/proficiency are long-term; only tier is monthly.** Recalibrating the tier's monthly
    divisors (`monthly_credit_target`, days-in-month) changes tier distribution but not skill
    or proficiency numbers.
-7. **`FABRIC_DRIVER`** default is a macOS path; on Linux/Azure set it to the ODBC driver name
-   and ensure msodbcsql18 is installed, or Fabric connections fail.
+7. **No ODBC driver / Fabric credentials needed anymore** — the app talks to the Classmate
+   table-dump API over plain HTTPS (`api_endpoint_url`, `api_subscription_key`,
+   `api_tenant_id`/`api_client_id`/`api_client_secret`, `api_scope` in `core/config.py`). If
+   `nova_warehouse.db` is missing or stale, the fix is `POST /api/admin/sync` or a restart (cold
+   start syncs automatically), not an ODBC/driver check.
+8. **Every new query that sources an employee/user_id population from
+   `dim_classmate_employee_profile` must exclude TMP placeholder rows** (`employee_id IS NULL OR
+   UPPER(TRIM(employee_id)) NOT LIKE 'TMP%'`) alongside the usual active/deleted filter. Most
+   reads get this for free via `_DEDUP_CTE`; anything written as a standalone query (there are
+   several across `routers/manager.py`, `routers/employee.py`, `services/team_service.py`,
+   `services/skill_service.py`, `services/recommendation_service.py`) needs the clause added by
+   hand — a new query that forgets it will silently let placeholder employees leak back into
+   counts.
 
 ---
 

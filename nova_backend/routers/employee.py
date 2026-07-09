@@ -255,7 +255,9 @@ def _get_team_reco_courses(manager_id: int, uid: int) -> list:
     from services.skill_service import _classify
     rows = query(
         """
-        SELECT vt.course_name, COUNT(*) AS completion_count
+        SELECT vt.course_name,
+               COUNT(*) AS completion_count,
+               MAX(vt.second_level_category_id) AS cat_id
         FROM   vw_classmate_trainings vt
         WHERE  vt.status = 4052
           AND  vt.user_id IN (
@@ -279,10 +281,100 @@ def _get_team_reco_courses(manager_id: int, uid: int) -> list:
         {
             "course_name":      r["course_name"],
             "completion_count": int(r["completion_count"]),
+            "cat_id":           r["cat_id"],
             "category":         _classify(r["course_name"] or "") or "Other",
         }
         for r in rows
     ]
+
+
+def _score_reco_matches(courses: list, uid: int) -> list:
+    """Assign each candidate course a real 0-100 ``match_pct`` using data that has
+    already been computed — no live LLM call.
+
+    Blends three signals the task list called for:
+      * teammate popularity — how many teammates completed it (relative to the set)
+      * skill-gap fill       — the course's vertical strengths weighted toward the
+                               user's currently-weakest axes (from the skill radar)
+      * similarity           — cosine similarity of the course's 5-axis vector to the
+                               user's own accumulated vertical profile
+
+    Vertical vectors come from the pre-graded ``course_vertical_scores`` table
+    (populated once by ``score_all_courses``), falling back to the keyword scorer
+    for any course not graded yet — the same fallback the grading pipeline uses.
+    """
+    if not courses:
+        return courses
+    import math
+    import zlib
+    from services.skill_service import _keyword_scores, AXES
+    from nova_db.course_scores import get_scores_for_items
+
+    def _tiebreak(name: str) -> float:
+        # Small, stable per-course nudge (0–10 raw points) so courses that share an
+        # identical vertical vector + completion count (common when a course isn't
+        # individually GPT-graded and the keyword fallback assigns every same-category
+        # course the same vector — for such courses there's genuinely no signal to rank
+        # them by, so a deterministic nudge is a fair tiebreak) don't collapse to one
+        # identical %. Derived from the name, not random, so order is stable run to run.
+        return (zlib.crc32((name or "").encode("utf-8", errors="replace")) % 1000) / 1000.0 * 10.0
+
+    pairs = [("course", int(c["cat_id"])) for c in courses if c.get("cat_id")]
+    score_map = get_scores_for_items(list(set(pairs)))
+
+    def _vec(c: dict) -> list:
+        cid = c.get("cat_id")
+        sc = score_map.get(("course", int(cid))) if cid else None
+        if sc is None:
+            sc = _keyword_scores(c["course_name"] or "")
+        return [float(sc.get(ax, 0)) for ax in AXES]
+
+    # User skill profile + per-axis gaps from the radar
+    try:
+        radar = calculate_skill_radar(uid)
+        this_month = radar.get("this_month", [0] * len(AXES))
+        raw = radar.get("_raw_scores", {})
+        profile = [float(raw.get(ax, 0)) for ax in AXES]
+    except Exception:
+        this_month = [0] * len(AXES)
+        profile = [0.0] * len(AXES)
+
+    gaps = [max(0.0, 100.0 - float(this_month[i])) for i in range(len(AXES))]
+    gap_total = sum(gaps) or 1.0
+    gap_w = [g / gap_total for g in gaps]
+
+    prof_norm = math.sqrt(sum(v * v for v in profile))
+    max_completions = max((c.get("completion_count", 0) for c in courses), default=0) or 1
+
+    raw_scores = []
+    for c in courses:
+        v = _vec(c)
+        teammate = 100.0 * (c.get("completion_count", 0) / max_completions)
+        skill_gap = sum(v[i] * gap_w[i] for i in range(len(AXES)))
+        v_norm = math.sqrt(sum(x * x for x in v))
+        if prof_norm > 0 and v_norm > 0:
+            cos = sum(v[i] * profile[i] for i in range(len(AXES))) / (prof_norm * v_norm)
+            similarity = max(0.0, cos) * 100.0
+        else:
+            similarity = 0.0
+        # skill_gap and similarity are structurally opposed (one rewards weak axes,
+        # the other rewards strong ones), so take the better of the two rather than
+        # averaging them into a permanently middling score.
+        relevance = max(skill_gap, similarity)
+        raw_scores.append(0.4 * teammate + 0.6 * relevance + _tiebreak(c.get("course_name", "")))
+
+    # Raw blended scores cluster tightly within a candidate set — stretch them into
+    # a wider, more legible display band (70–98%) instead of showing uniformly low
+    # numbers. Scoring the full candidate pool (not a pre-sliced top 4) gives enough
+    # spread that the exact-tie fallback rarely fires.
+    lo, hi = min(raw_scores), max(raw_scores)
+    for c, raw in zip(courses, raw_scores):
+        if hi - lo < 1e-9:
+            match = 84.0  # band midpoint — only when every candidate ties exactly
+        else:
+            match = 70.0 + (raw - lo) / (hi - lo) * 28.0
+        c["match_pct"] = max(0, min(100, round(match)))
+    return courses
 
 
 def _get_fallback_reco_courses(uid: int) -> list:
@@ -452,9 +544,21 @@ async def employee_team(user: CurrentUser = Depends(get_current_user)):
 
     # If the team has nothing to recommend yet, fall back to visible courses biased
     # to the user's own learning, and tell the frontend to show the waiting message.
-    team_reco = filtered_reco[:4]
-    if team_reco:
-        popular_courses, popular_source = team_reco, "team"
+    # Score the FULL filtered pool (not a pre-sliced top 4), then take the 4 best
+    # matches — a larger pool spreads scores out and shows the most relevant courses
+    # rather than just the most teammate-popular ones.
+    if filtered_reco:
+        scored = await _run(_score_reco_matches, filtered_reco, uid)
+        popular_courses = sorted(scored, key=lambda c: c["match_pct"], reverse=True)[:4]
+        # Guarantee the shown cards read as strictly-descending distinct %s — the
+        # tiebreak above spreads genuine ties in most cases, but this is a cheap
+        # belt-and-suspenders so two cards never display the same number.
+        prev = None
+        for c in popular_courses:
+            if prev is not None and c["match_pct"] >= prev:
+                c["match_pct"] = max(0, prev - 1)
+            prev = c["match_pct"]
+        popular_source = "team"
     else:
         popular_courses = await _run(_get_fallback_reco_courses, uid)
         popular_source = "fallback"

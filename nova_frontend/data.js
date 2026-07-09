@@ -8,9 +8,9 @@
   const TIERS = [
     {key:'starter',  name:'Starter',  color:'#9aa2b1'},
     {key:'bronze',   name:'Bronze',   color:'#e08531'},
-    {key:'silver',   name:'Silver',   color:'#9aa3af'},
+    {key:'silver',   name:'Silver',   color:'#7EC8E3'},
     {key:'gold',     name:'Gold',     color:'#f5b71e'},
-    {key:'diamond',  name:'Diamond',  color:'#2ACCFF'},
+    {key:'diamond',  name:'Diamond',  color:'#0a2473'},
     {key:'platinum', name:'Platinum', color:'#A634FF'},
   ];
 

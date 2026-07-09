@@ -34,6 +34,20 @@ const Icons = {
   moon: svg([P('M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z','a')]),
 };
 
+/* course vertical → FontAwesome solid icon (Kit script auto-swaps <i> for SVG).
+   Falls back to null for unknown/"Other" so callers can use their text glyph. */
+const VERTICAL_FA = {
+  ai:       'robot',
+  cloud:    'cloud',
+  data:     'chart-pie',
+  frontend: 'palette',
+  backend:  'code',
+};
+function verticalIcon(category){
+  const name = VERTICAL_FA[(category || '').toLowerCase()];
+  return name ? h('i', {className:`fa-solid fa-${name}`, 'aria-hidden':true}) : null;
+}
+
 /* avatar — gradient monogram */
 function Avatar({name, grad, size='m', style}){
   const initials = name.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
@@ -90,4 +104,4 @@ function Ribbon({color, glyph, size=44}){
   );
 }
 
-Object.assign(window, { h, Icons, Avatar, Hex, tierHexInner, TierGlyph, Ribbon });
+Object.assign(window, { h, Icons, Avatar, Hex, tierHexInner, TierGlyph, Ribbon, verticalIcon });
