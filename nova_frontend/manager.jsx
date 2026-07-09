@@ -60,17 +60,94 @@ function SpecializationBar({data}){
 }
 
 /* ---------- Team Leaderboard (REAL per-dept proficiency: name + bar + %) ---------- */
+// Client-side fuzzy match over already-loaded rows, mirroring the backend
+// _fuzzy_filter in routers/manager.py: exact substring (ranked prefix →
+// word-start → anywhere), then all-tokens match, then Levenshtein ≤ 2.
+function _leaderboardFuzzy(rows, q){
+  if(!q || !q.trim()) return rows;
+  q = q.trim().toLowerCase();
+  const tokens = q.split(/\s+/);
+  const lev = (a,b)=>{
+    if(a===b) return 0;
+    if(!a) return b.length;
+    if(!b) return a.length;
+    let prev = Array.from({length:b.length+1},(_,i)=>i);
+    for(let i=0;i<a.length;i++){
+      const curr=[i+1];
+      for(let j=0;j<b.length;j++){
+        curr.push(Math.min(prev[j]+(a[i]===b[j]?0:1), curr[j]+1, prev[j+1]+1));
+      }
+      prev=curr;
+    }
+    return prev[b.length];
+  };
+  const pos = (name,query)=>{
+    if(name.startsWith(query)) return 0;
+    if(name.split(/\s+/).some(w=>w.startsWith(query))) return 1;
+    return 2;
+  };
+  const exact=[], tok=[], fz=[];
+  for(const r of rows){
+    const name=(r.name||'').toLowerCase();
+    if(!name) continue;
+    if(name.includes(q)){
+      exact.push([pos(name,q), r]);
+    } else if(tokens.every(t=>name.includes(t))){
+      tok.push([Math.min(...tokens.map(t=>pos(name,t))), r]);
+    } else {
+      const words=name.split(/\s+/);
+      const hit=tokens.some(t=>words.some(w=>Math.abs(t.length-w.length)<=2 && lev(t,w)<=2));
+      if(hit) fz.push(r);
+    }
+  }
+  exact.sort((a,b)=>a[0]-b[0]);
+  tok.sort((a,b)=>a[0]-b[0]);
+  return [...exact.map(x=>x[1]), ...tok.map(x=>x[1]), ...fz];
+}
+
 function TeamLeaderboard({rows}){
+  const [asc,setAsc]=useStateM(false);   // false = High → Low (default)
+  const [q,setQ]=useStateM('');
+
   if(!rows || !rows.length){
     return h('div',{style:{padding:'24px 6px',color:'var(--muted)',fontSize:13,fontWeight:600}},'No team data yet.');
   }
-  return h('div',{style:{display:'flex',flexDirection:'column',gap:2}},
-    rows.slice(0,6).map((t,i)=>h('div',{key:i,className:'leader-row'},
-      h('div',{style:{width:20,fontSize:13,fontWeight:800,color:'var(--muted)'}}, (i+1)),
-      h('div',{style:{flex:1,minWidth:0}},
-        h('div',{style:{fontWeight:800,fontSize:14,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}, t.name),
-        h('div',{className:'bar-wide',style:{marginTop:6}}, h('i',{style:{width:t.prof+'%',background:'linear-gradient(90deg,#2ACCFF,#A634FF)'}}))),
-      h('div',{style:{fontWeight:800,fontSize:15,width:44,textAlign:'right'}}, t.prof+'%')))
+
+  // True competitive rank (1 = highest score), stable regardless of the display
+  // sort direction or an active search filter.
+  const ranked = rows.slice().sort((a,b)=>b.prof-a.prof).map((t,i)=>Object.assign({}, t, {rank:i+1}));
+  let list = _leaderboardFuzzy(ranked, q);
+  list = list.slice().sort((a,b)=> asc ? (a.prof-b.prof) : (b.prof-a.prof));
+
+  return h('div',null,
+    // controls: fuzzy search + sort-direction toggle
+    h('div',{style:{display:'flex',gap:8,marginBottom:12,alignItems:'center'}},
+      h('div',{style:{position:'relative',flex:1,minWidth:0}},
+        h('input',{type:'text', placeholder:'Search manager…', value:q,
+          onChange:e=>setQ(e.target.value),
+          style:{width:'100%',padding:'8px 28px 8px 32px',borderRadius:10,border:'1.5px solid var(--line)',
+            background:'var(--card)',fontSize:13,fontWeight:600,color:'var(--ink)',outline:'none',boxSizing:'border-box'}}),
+        h('span',{style:{position:'absolute',left:10,top:'50%',transform:'translateY(-50%)',color:'var(--muted)',pointerEvents:'none',display:'flex'}},
+          Icons.search ? Icons.search({size:14}) : h('span',{style:{fontSize:12}},'🔍')),
+        q && h('button',{onClick:()=>setQ(''),
+          style:{position:'absolute',right:7,top:'50%',transform:'translateY(-50%)',background:'none',border:0,
+            color:'var(--muted)',fontSize:16,cursor:'pointer',lineHeight:1,padding:'0 2px'}},'\xD7')),
+      h('button',{className:'lb-sort-btn', onClick:()=>setAsc(a=>!a), title:'Toggle sort order',
+        style:{flex:'0 0 auto',display:'flex',alignItems:'center',gap:5,padding:'8px 11px',borderRadius:10,
+          border:'1.5px solid var(--line)',background:'var(--card)',color:'var(--ink)',fontSize:12,fontWeight:700,
+          cursor:'pointer',whiteSpace:'nowrap'}},
+        asc ? 'Low → High' : 'High → Low')),
+
+    // scrollable ranked list — all teams, not just the top 6
+    h('div',{className:'leader-scroll',style:{maxHeight:360,overflowY:'auto',scrollbarWidth:'thin'}},
+      list.length===0
+        ? h('div',{style:{padding:'20px 6px',color:'var(--muted)',fontSize:13,fontWeight:600}},'No managers match.')
+        : list.map(t=>h('div',{key:t.rank,className:'leader-row'},
+            h('div',{style:{width:34,fontSize:13,fontWeight:800,color:'var(--muted)'}}, '#'+t.rank),
+            h('div',{style:{flex:1,minWidth:0}},
+              h('div',{style:{fontWeight:800,fontSize:14,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}, t.name),
+              h('div',{className:'bar-wide',style:{marginTop:6}}, h('i',{style:{width:t.prof+'%',background:'linear-gradient(90deg,#2ACCFF,#A634FF)'}}))),
+            h('div',{style:{fontWeight:800,fontSize:15,width:44,textAlign:'right'}}, t.prof+'%'))))
   );
 }
 

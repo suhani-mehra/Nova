@@ -915,20 +915,33 @@ def _compute_manager_team_snapshot() -> list:
             for uid in uncached_uids:
                 uid_skill.setdefault(uid, 0.0)
 
+    # Bayesian shrinkage toward the company-wide average, weighted by team size.
+    # A raw team average lets tiny teams (1–3 reports) top the board on a lucky
+    # couple of high performers; blending each team's average with the company
+    # average — weighted by headcount — pulls small, low-evidence teams toward the
+    # center while leaving large teams (n >> K) essentially unchanged. K ≈ the mean
+    # team size in this data, so teams above average size keep most of their own
+    # signal. Retune K to shift how hard small teams get pulled down.
+    company_avg = sum(uid_skill.values()) / len(uid_skill) if uid_skill else 0.0
+    K = 8
+
     result = []
     for mgr_id, uids_in_team in mgr_uids.items():
         if not uids_in_team:
             continue
-        avg_skill = round(sum(uid_skill.get(uid, 0.0) for uid in uids_in_team) / len(uids_in_team), 1)
+        n = len(uids_in_team)
+        avg_skill = round(sum(uid_skill.get(uid, 0.0) for uid in uids_in_team) / n, 1)
+        shrunk_skill = round((n * avg_skill + K * company_avg) / (n + K), 1)
         try:
             prof = get_employee_profile(None, mgr_id)
             name = prof[0]["name"] if prof and prof[0].get("name") else f"Manager {mgr_id}"
         except Exception:
             name = f"Manager {mgr_id}"
         result.append({
-            "name":          name,
-            "headcount":     len(uids_in_team),
-            "avg_skill_pct": avg_skill,
+            "name":              name,
+            "headcount":         n,
+            "avg_skill_pct":     shrunk_skill,   # shrunk score — what the leaderboard ranks/shows
+            "raw_avg_skill_pct": avg_skill,      # unshrunk team average, kept for reference
         })
 
     result.sort(key=lambda x: x["avg_skill_pct"], reverse=True)
