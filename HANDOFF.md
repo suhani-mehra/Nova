@@ -17,10 +17,11 @@ It has two audiences, served from one app:
   - **Overview** (company-wide, **exec managers only**): an AI-proficiency trend chart by
     quarter with a second "by region" tab (four proficiency levels split by Asia/North
     America/Europe), a Proficiency-by-Vertical chart, an Active-learners-this-week card, a
-    Specialization Landscape, and a per-department Team Leaderboard.
-  - **Your Team** (direct reports only, **any manager**): a team-average skill radar, a badges
-    donut, active-learners + courses-completed this week, and a searchable people list with each
-    person's tier, proficiency, and learning streak.
+    Specialization Landscape, and a per-manager-team Team Leaderboard (scroll/search/sortable).
+  - **Your Team** (direct reports only, **any manager**): a team-average skill radar (with a
+    "compare with top team" overlay), a badges donut, an active-learners count, a Team Landscape
+    scatter (AI proficiency × active days), and a searchable people list with each person's tier,
+    proficiency, and learning streak.
 
 The whole app is **light or dark**, a per-account preference toggled from the profile menu and
 persisted server-side (see §5).
@@ -134,16 +135,25 @@ stale-while-revalidate), `set_cache(key, result, scored_by, ttl_hours)`,
   (so you can see employee and manager views).
 - **Role** is one of `"employee"`, `"manager"`, `"both"` and drives which tabs/data load.
 - **Exec managers** are a separate, narrower concept layered on top of role. `EXEC_USER_IDS`
-  in `routers/manager.py` (`{5575, 16467, 16465, 16470}`, extended at startup from
-  `EXEC_USER_NAMES` via `_init_exec_users()`) governs company-wide access. The Overview tab
-  and `/api/manager/overview` are gated by `_is_exec_manager(user)` = *in `EXEC_USER_IDS`
-  **and** actually a manager* (`role in {manager, both}`). Since the non-Pradeep IDs aren't
-  managers, this resolves to **Pradeep Menon (5575) only** today. `/api/me` surfaces this as
-  `is_exec_manager` so the frontend shows/hides the Overview tab. `RECURSIVE_USER_IDS` (`{5575}`)
-  additionally unlocks recursive-org people search for that user.
-- **Dev impersonation:** the *same* exec IDs can pass `X-Nova-Dev-User` (sign in as any user)
-  or `X-Nova-Impersonate` (view as another user). The frontend stores these in sessionStorage
-  and only shows the impersonation panel for `16467/16465/16470`.
+  in `routers/manager.py` (`{5575, 16467, 16465, 16470}` = Pradeep Menon / Niva Shah / Eric
+  Verdes / Suhani Mehra) is the profile-level exec set. It governs two things: the Overview tab
+  (`/api/manager/overview`, gated by `_is_exec_manager(user)` = *in `EXEC_USER_IDS` **and** a
+  manager* — `role in {manager, both}`) and **company-wide people search**. `/api/me` surfaces
+  `is_exec_manager` so the frontend shows/hides the Overview tab.
+- **People-search scope is a profile rule, keyed off the *effective* user** (the impersonated
+  profile when impersonating, else the real one) so impersonation faithfully reproduces each
+  role's experience: an **exec profile** searches **company-wide**; **every other manager**
+  searches their **whole org subtree** — direct **and** indirect reports — via
+  `_search_recursive_org()`, a `WITH RECURSIVE` CTE that walks the `manager` field transitively
+  from the manager's id (local SQLite supports recursive CTEs; the old "Synapse can't do
+  recursive CTEs → fall back to company-wide" stub is gone). See §6.9b / §10.
+- **Dev impersonation:** exec IDs pass `X-Nova-Dev-User` (sign in as any user) or
+  `X-Nova-Impersonate` (view as another user), stored in sessionStorage; the impersonation panel
+  shows only for `16467/16465/16470`. The panel's own search calls
+  `/api/manager/people/search?scope=impersonate&q=…`, which is **always company-wide** (gated on
+  the *real* signed-in dev being an exec, independent of who they're impersonating) so a dev can
+  always find anyone to view-as — distinct from the default (no-`scope`) manager-page search
+  above, which reflects the effective profile.
 - **Color mode (light/dark):** a per-account preference stored in `user_settings.color_mode`
   (`nova_db/user_settings.py`). `/api/me` returns `color_mode`; the profile-menu toggle writes
   it via `POST /api/me/color-mode`. The frontend stamps `<html data-theme>` (see §8) and caches
@@ -330,9 +340,9 @@ Served by `GET /api/manager/overview` (403 unless `_is_exec_manager`). Contents:
   query** using the 3-source activity union (learning credit w/ duration, skill-status update,
   attended self-study) restricted to active employees — `_get_company_active_this_week()`. It
   does **not** depend on per-user `streak_{uid}` caches being warm (an earlier version read
-  those and reported 0 at cold start). Trend = current count vs a weekly baseline
-  (`company_active_prev`, 7-day TTL). `total_team` (company headcount) drives the "% of N"
-  denominator.
+  those and reported 0 at cold start). `total_team` (company headcount) drives the "% of N"
+  denominator. (No week-over-week trend indicator — it was removed; the card shows just the
+  count and "% of N employees".)
 
 **AI-proficiency trend chart (Trend tab):** builds 6 completed quarters (plus a hidden warm-up
 quarter for context). Per quarter, each employee's cumulative AI raw (up to that quarter's end)
@@ -356,9 +366,23 @@ and those employees are dropped from the region chart entirely rather than rende
 catch-all bar. Cached as `ai_proficiency_by_region`, same 25h TTL / nightly-recompute pattern as
 the trend chart.
 
-**Team Leaderboard:** per-department AI proficiency (name + bar + %), sourced from the same
-`_compute_dept_snapshot()` cache (each department = % of members AI-proficient at `≥30`),
-sorted best-first, shown top 6. Folded into the overview response as `team_leaderboard`.
+**Team Leaderboard:** **per-manager team** skill average (name + bar + %), from
+`_compute_manager_team_snapshot()` (cache `team_leaderboard_by_manager`). A "team" = one
+manager's direct reports (grouped by the `manager` field across the active population). Each
+person's score is the **mean of all 5 normalized skill axes** (not just AI proficiency); the
+team's raw score is the mean of its members'. To stop tiny teams (1–3 reports) from topping the
+board on a couple of lucky high performers, each team's raw average is **Bayesian-shrunk toward
+the company-wide average**, weighted by headcount: `shrunk = (n*team_avg + K*company_avg)/(n+K)`
+with `K = 8` (≈ mean team size — retune to shift how hard small teams are pulled down). Ranked
+by the shrunk score; the row title is the **manager's display name** (via
+`get_employee_profile(mgr_id)`; deleted/inactive managers fall back to `"Manager {id}"` because
+their profile no longer passes the active dedup filter). Folded into the overview response as
+`team_leaderboard` (`{name, prof}`, `prof` = shrunk %). The frontend
+(`TeamLeaderboard` in `manager.jsx`) shows **all** teams in a scrollable list (true competitive
+rank `#1…#N` shown per row, stable regardless of display order), with a **High→Low / Low→High
+sort toggle** and a **fuzzy search box** (client-side, mirrors the backend `_fuzzy_filter`:
+substring → all-tokens → Levenshtein ≤2). While a search is active the list is ordered by
+**match similarity** (best-match first) and the sort toggle is disabled ("Best match").
 
 **Proficiency by Vertical** and **Specialization Landscape** are **static placeholders**
 (hardcoded in `nova_frontend/data.js` as `NOVA.managerStatic`, marked TODO). There is **no
@@ -369,19 +393,31 @@ mockup's client-industry names — so these two charts wait for a real API.
 ### 6.9b Manager "Your Team" (direct reports, any manager)
 
 Served by `GET /api/manager/your-team` (any manager; `_require_manager`). Layout: a top row of
-a team radar, a badges donut, and a stacked right rail (Active learners + Courses completed this
-week), then the people table. Returns:
+a team radar, a badges donut, and a right rail holding a **compact Active-learners card**
+(title + number only) above a **Team Landscape scatter plot** (the old "Courses completed this
+week" card was replaced by the scatter); then the people table. Returns:
 
 - **people:** direct reports enriched via `_build_people_list()` — tier (live `tier_{uid}`
   overlay), AI proficiency, 90-day credits, last active, status (`at risk` if AI proficiency
-  < 20, else `on track`), and **`streak_days`** (from `get_team_streaks()`, reading warm
-  `streak_{uid}` caches / computing misses per-user). The people table shows a 🔥 streak pill
-  next to the name when `streak_days > 0`.
+  < 20, else `on track`), **`streak_days`** (from `get_team_streaks()`, reading warm
+  `streak_{uid}` caches / computing misses per-user), and **`active_days_total`** — an all-time
+  distinct-active-day count per person, from the same 3-source activity union as streaks
+  (`fact_classmate_learning_credit` w/ `duration>0`, `fact_classmate_user_skill_status` w/
+  `is_active=1`, `fact_classmate_self_study` w/ `status=2`) but with **no date cap** (streaks
+  window to 30/90/365 days; this is lifetime), added as one batched query alongside the existing
+  credits/last-active batches. The people table shows a 🔥 streak pill next to the name when
+  `streak_days > 0`. (Cache key bumped to `people_list_v3_{mgr_id}_{filter}` when
+  `active_days_total` was added.)
 - **radar:** team-averaged skill radar with two series (`get_team_skill_radar()` averages each
   axis's `this_month` / `last_month` across the reports, reusing the `classify_{uid}` cache).
   The frontend applies a visual floor shift (0 → the 25% ring) so an all-zero team doesn't
   collapse to the center, and passes the true (unshifted) values as per-axis % labels — matching
-  the employee Skill Growth radar.
+  the employee Skill Growth radar. A **"Compare with top team"** picker overlays one of the Top 5
+  leaderboard teams' radars (single-select, reusing `RadarChart`'s `compareWith` prop — same
+  pattern as the employee page's teammate compare). Those 5 teams' full 5-axis radars ship with
+  the page as **`top_teams`** (`_get_top_teams_with_radar()`, cache `top_teams_radar`): it takes
+  the top 5 of `team_leaderboard_by_manager` and runs `get_team_skill_radar()` on each manager's
+  reports — so switching the picker is instant/client-side, no extra round-trip.
 - **badges:** team badge summary (`get_team_badge_summary()` in `nova_db/badges.py`) — total,
   avg per person, this-month count, and a per-tier breakdown — rendered as a **hollow donut**
   (`DonutChart` in `charts.jsx`) with the total in the center and a color key listing each
@@ -389,13 +425,26 @@ week), then the people table. Returns:
 - **active_this_week / courses_this_week:** direct-reports-scoped counts for the current week,
   via `_get_team_active_this_week(uids)` (3-source activity union) and
   `_get_team_courses_completed_this_week(uids)` (completed `vw_classmate_trainings` rows). Both
-  reuse the same weekly window as the company metric, filtered to the manager's report uids;
-  shown as the two rail cards (count + "% / across N direct reports"). `team_size` is the
-  denominator. Cached with radar/badges under `your_team_v3_{mgr_id}` (25h TTL, SWR-served).
+  reuse the same weekly window as the company metric, filtered to the manager's report uids.
+  `active_this_week` now drives the compact rail card (just the count); `courses_this_week` is
+  still returned but no longer surfaced in a card (the scatter took that slot). `team_size` is
+  the denominator. Cached with radar/badges/top_teams under `your_team_v3_{mgr_id}` (25h TTL,
+  SWR-served).
+- **Team Landscape scatter** (`ScatterChart` in `charts.jsx`): one dot per direct report,
+  x = AI proficiency (0–100), y = `active_days_total`; at-risk dots (prof < 20) colored red,
+  others brand purple. Built from the **full** team (ignores the table's filter/search). Hover
+  shows the name; **clicking a dot ⇄ clicking a table row** is a two-way selection — either
+  highlights the person's row (`.ppl-row.selected`) and scrolls it into view (clearing an active
+  filter/search if that person was hidden), and selects the corresponding dot (larger radius +
+  white ring). Sized compactly for the narrow rail.
 
-**People search** (`GET /api/manager/people/search`, fuzzy) is scoped by exec status: exec
-managers search company-wide (Pradeep additionally recursive-org); everyone else searches only
-their direct reports. Results carry the same enriched fields incl. `streak_days`.
+**People search** (`GET /api/manager/people/search`, fuzzy — `_fuzzy_filter`) is scoped by the
+**effective (impersonated) profile** (see §5): exec profiles search company-wide; every other
+manager searches their **whole org subtree** (direct + indirect) via `_search_recursive_org()`.
+The dev-impersonation panel passes `scope=impersonate` for an always-company-wide search gated on
+the real signed-in dev. `search_scope` in the response (`company` / `recursive`) drives the
+frontend's "Exec view" / "Extended view" banner. Results carry the same enriched fields incl.
+`streak_days`.
 
 ### 6.10 Congrats
 
@@ -417,19 +466,20 @@ in the background) so a request never blocks on a recompute.
   sync this is instant; on a genuinely cold start (no warehouse file yet) it blocks on a full
   sync (~570k rows from the API) before anything else. Then: init all SQLite tables, then fire
   background jobs — prewarm skill (`classify_*`) and streak caches, grade any unscored courses,
-  compute company stats / retention / at-risk / quarterly AI trend / department snapshot /
-  AI-proficiency-by-region snapshot, and refresh tier scores.
+  compute company stats / retention / at-risk / quarterly AI trend / team-leaderboard snapshot
+  (`_compute_manager_team_snapshot`) / AI-proficiency-by-region snapshot, and refresh tier scores.
 - **Nightly at 03:00 UTC** (`_run_nightly_refresh`, after the upstream lakehouse ETL, ~12–2 AM):
   **re-syncs the warehouse from the Classmate API first** (if this fails, caches simply rebuild
   from the previous day's snapshot rather than blocking) → **[on the 1st] award last month's
   badges →** force-refresh tier scores (current month) → prewarm skill & streak → recompute
-  company stats/trend/dept snapshot/region snapshot → clear & rebuild per-manager caches. A
-  manual re-sync is also available via `POST /api/admin/sync`.
+  company stats/trend/team-leaderboard snapshot/region snapshot → clear & rebuild per-manager
+  caches. A manual re-sync is also available via `POST /api/admin/sync`.
 - **Typical TTLs:** most derived `gpt_cache` entries 24–25h; `user_tier_scores` 24h;
-  `dept_ai_baseline` ~60 days; `course_vertical_scores` and app-owned tables persist.
+  `course_vertical_scores` and app-owned tables persist.
 
 **Operational note:** if you change a scoring formula/threshold, purge the affected derived
-caches (`tier_*`, `dept_snapshot`, `ai_proficiency_trend`, `company_*`, etc.) and let the
+caches (`tier_*`, `team_leaderboard_by_manager`, `top_teams_radar`, `ai_proficiency_trend`,
+`company_*`, etc.) and let the
 endpoints/nightly job recompute. Never purge `course_vertical_scores` casually (slow +
 costs LLM calls to rebuild) or the app-owned `user_badges` / `congrats`.
 
@@ -456,17 +506,21 @@ costs LLM calls to rebuild) or the app-owned `user_badges` / `congrats`.
    a real `match_pct`),
    **MyTeam** (highlights, accomplishments with congrats, team recommendations),
    **MgrOverview** (two-column: chart card with "Trend"/"By region" toggle + Proficiency-by-Vertical
-   on the left; Active-learners hero + Specialization Landscape + Team Leaderboard on the
-   right), **MgrYourTeam** (team radar + badges donut + active/courses-this-week rail, then the
-   searchable people table with 🔥 streak pills).
+   on the left; Active-learners hero + Specialization Landscape + scroll/search/sortable Team
+   Leaderboard on the right), **MgrYourTeam** (team radar with top-team compare + badges donut +
+   a rail holding a compact Active-learners card above the Team Landscape scatter, then the
+   searchable people table with 🔥 streak pills; scatter ⇄ table two-way selection).
 5. `charts.jsx`: **RadarChart** (5-axis skill polygon; this-month solid, last-month dashed,
-   optional teammate compare, optional per-axis `labelValues` %), **LineChart** (quarterly
-   AI-proficient % filled line + % active dashed line + 80% target), **RegionProficiencyChart**
-   (grouped bars per proficiency level — one bar per region at that region's own proficiency
-   rate, with a dashed per-level goal line, a company-actual tick, and a hover tooltip), and
-   **DonutChart** (hollow ring with a centered total and a color key). Chart neutrals use
+   optional compare series via `compareWith`, optional per-axis `labelValues` %), **LineChart**
+   (quarterly AI-proficient % filled line + % active dashed line + 80% target),
+   **RegionProficiencyChart** (grouped bars per proficiency level — one bar per region at that
+   region's own proficiency rate, with a dashed per-level goal line, a company-actual tick, and a
+   hover tooltip), **DonutChart** (hollow ring with a centered total and a color key), and
+   **ScatterChart** (Team Landscape — one dot per teammate, x = AI proficiency, y = active days,
+   hover tooltip, click-to-select via `onSelect`/`selectedId`). Chart neutrals use
    `--chart-grid`/`--chart-label`/`--tooltip-*` tokens so charts stay legible in dark mode;
-   brand series colors are theme-independent. Ribbons/tier visuals in `icons.jsx`.
+   brand series colors are theme-independent. Ribbons/tier visuals in `icons.jsx`;
+   `verticalIcon()` maps a course vertical → FontAwesome icon.
 6. **Theming:** `styles.css` defines all neutral/surface/chart tokens under `:root` and a dark
    override under `:root[data-theme="dark"]` (brand accents stay identical). `<html data-theme>`
    is set pre-paint by an inline script in `index.html` (from `localStorage.nova_theme`) and
@@ -477,8 +531,9 @@ The frontend mapping is where raw fields become display fields — e.g. `tier.pr
 E.tierProgress`, `skills.this_month → radar`, `monthly_trend → overview.months + series`,
 `proficiency_by_region → overview.proficiencyByRegion` (via `mapProficiencyByRegion`),
 `team_leaderboard → overview.teamLeaderboard`, `your-team employees → team.people`
-(with `streak_days → streak`), `active_this_week/courses_this_week → team.activeThisWeek /
-team.coursesThisWeek`, `color_mode → account.colorMode`, badge counts → donut segments.
+(with `streak_days → streak`, `active_days_total → activeDays`), `top_teams → team.topTeams`,
+`active_this_week/courses_this_week → team.activeThisWeek / team.coursesThisWeek`,
+`color_mode → account.colorMode`, badge counts → donut segments.
 
 ---
 
@@ -500,7 +555,10 @@ team.coursesThisWeek`, `color_mode → account.colorMode`, badge counts → donu
 | Streak min | 1800 s/day setting (activity-based day detection) |
 | Completed status | `4052` (course), `2` (cert/self-study); in-progress `4035` |
 | Dev user | Pradeep Menon `5575`; exec devs `16467/16465/16470` |
-| Exec managers (Overview gate) | `EXEC_USER_IDS` ∩ managers → Pradeep `5575` only today |
+| Exec profiles | `EXEC_USER_IDS = {5575, 16467, 16465, 16470}` → Overview tab + company-wide search; Overview gate also requires manager role |
+| People-search scope | exec → company-wide; other managers → recursive org subtree (`_search_recursive_org`); dev panel (`scope=impersonate`) → always company-wide |
+| Team Leaderboard | per-manager team, mean of 5 axes, Bayesian shrinkage `K=8` toward company avg |
+| Team scatter y-axis | `active_days_total` — all-time distinct active days (no date cap) |
 | LLM | Azure OpenAI `gpt-4o-mini` |
 | Nightly refresh | 03:00 UTC |
 
@@ -536,6 +594,17 @@ team.coursesThisWeek`, `color_mode → account.colorMode`, badge counts → donu
    `services/skill_service.py`, `services/recommendation_service.py`) needs the clause added by
    hand — a new query that forgets it will silently let placeholder employees leak back into
    counts.
+9. **People-search scope keys off the *effective* (impersonated) user, but the dev-panel search
+   keys off the *real* signed-in dev.** The manager-page search (`/api/manager/people/search`
+   with no `scope`) must use `user.classmate_user_id` (the impersonated profile) so QA sees each
+   role's real experience; the ⚡ dev-panel search (`scope=impersonate`) must use the real
+   `X-Nova-Dev-User` and always go company-wide so a dev can find anyone to view-as. Don't
+   collapse these back into one branch.
+10. **A manager whose reports point at a since-deleted manager still form a "team."** Grouping by
+    the raw `manager` field can key on a manager_id that no longer passes the active/dedup
+    filter, so `get_employee_profile()` returns no name → the Team Leaderboard shows
+    `"Manager {id}"`. This is a source-data staleness artifact (the report's `manager` wasn't
+    repointed), not a bug in the grouping.
 
 ---
 
