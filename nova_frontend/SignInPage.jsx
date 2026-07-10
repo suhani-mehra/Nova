@@ -109,7 +109,7 @@ function SignInPage({ onSignIn, onDevSignIn, contactHref = "#" }) {
 /* ---- Private icons (prefixed _ so they don't pollute the global namespace) ---- */
 
 function _OILogo() {
-  return <img className="nova-signin__oi-img" src="/logo-dark.svg" alt="OI Polaris" />;
+  return <img className="nova-signin__oi-img" src="/logo-white.svg" alt="OI Polaris" />;
 }
 
 function _SparkleIcon() {
