@@ -118,7 +118,7 @@ function ExecDevPanel({ myId }) {
     if (!q.trim()) { setResults([]); setOpen(false); return; }
     debounceRef.current = setTimeout(async () => {
       setLoading(true);
-      const data = await apiGet('/api/manager/people/search?q=' + encodeURIComponent(q));
+      const data = await apiGet('/api/manager/people/search?scope=impersonate&q=' + encodeURIComponent(q));
       setLoading(false);
       if (data && data.employees) {
         setResults(data.employees.slice(0, 8));

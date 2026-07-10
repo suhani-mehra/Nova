@@ -231,6 +231,7 @@ function _mapPersonRow(e) {
     tier:        e.tier,
     prof:        Math.round(e.ai_proficiency),
     streak:      e.streak_days || 0,
+    activeDays:  e.active_days_total || 0,
     status:      Math.round(e.ai_proficiency) < 20 ? 'risk' : 'ok',
     av:          _nameToGrad(e.name),
     scoredBy:    e.scored_by || 'keywords',
@@ -289,6 +290,14 @@ function mapYourTeam(data) {
     },
     people,
     riskCount: people.filter(p => p.status === 'risk').length,
+    // Top 5 leaderboard teams with full 5-axis radar, for the radar-overlay picker.
+    topTeams: (data.top_teams || []).map(t => ({
+      manager_id: t.manager_id,
+      name:       t.name,
+      avgSkill:   Math.round(t.avg_skill_pct || 0),
+      axes:       t.axes || ['AI','Cloud','Frontend','Backend','Data'],
+      this_month: t.this_month || [0,0,0,0,0],
+    })),
   };
 }
 

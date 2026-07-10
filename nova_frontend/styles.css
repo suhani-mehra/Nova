@@ -430,6 +430,7 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 .ppl-head{padding:0 16px 12px;font-size:11.5px;font-weight:700;color:var(--muted-2);text-transform:uppercase;letter-spacing:.05em}
 .ppl-row{padding:14px 16px;border-radius:14px;border:1px solid transparent;transition:.14s}
 .ppl-row:hover{background:var(--surface-hover);border-color:var(--line)}
+.ppl-row.selected{background:color-mix(in srgb,var(--purple) 9%,var(--card));border-color:color-mix(in srgb,var(--purple) 35%,var(--line));box-shadow:inset 3px 0 0 var(--purple)}
 .ppl-row .who{display:flex;align-items:center;gap:13px;min-width:0}
 .ppl-row .who .nm{font-weight:700;font-size:14.5px}
 .ppl-row .who .rl{font-size:12px;color:var(--muted);font-weight:600}
@@ -607,11 +608,15 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 
 /* Your Team top row: radar + badges donut (left) · active learners (right) */
 .mgr-team-top{align-items:stretch}
-.mgr-team-radar{flex:1.3;min-width:0}
-.mgr-team-badges{flex:1.15;min-width:0}
-.mgr-team-rail{flex:.9;min-width:0;display:flex;flex-direction:column;gap:22px}
+.mgr-team-radar{flex:1.15;min-width:0}
+.mgr-team-badges{flex:1;min-width:0}
+.mgr-team-rail{flex:1.15;min-width:0;display:flex;flex-direction:column;gap:22px}
 .hero-compact,.hero-fill{flex:1;display:flex;flex-direction:column;justify-content:center}
 .hero-num-sm{font-size:40px}
+/* compact Active-learners card: title + number only, no subtext */
+.hero-mini{flex:0 0 auto;padding:16px 20px}
+.hero-mini .hero-num-sm{font-size:34px;margin-top:6px}
+.mgr-team-scatter{min-width:0}
 @media (max-width:1000px){ .mgr-team-radar,.mgr-team-badges,.mgr-team-rail{flex:auto} }
 
 /* gradient hero stat cards (Active learners / Team badges) */

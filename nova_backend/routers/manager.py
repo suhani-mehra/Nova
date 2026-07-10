@@ -67,13 +67,13 @@ def _swr(cache_key: str, compute_fn, fallback):
 
 # ── Exec access sets ──────────────────────────────────────────────────────────
 
-EXEC_USER_IDS: set[int] = {5575, 16467, 16465, 16470}  # hardcoded + DB-resolved
-EXEC_USER_NAMES = [
-    "suhani mehra",
-    "niva nimesh shah",
-    "eric verdes",
-]
-RECURSIVE_USER_IDS: set[int] = {5575}
+# Exec profiles: get the company-wide Overview tab and company-wide people search.
+# Every other manager searches only their own org subtree (direct + indirect
+# reports) — see _search_recursive_org. This is a profile-level rule keyed off the
+# EFFECTIVE user (so impersonating an exec shows the exec experience, and
+# impersonating a normal manager shows the recursive one).
+# 5575 = Pradeep Menon; 16467/16465/16470 = Niva Shah / Eric Verdes / Suhani Mehra.
+EXEC_USER_IDS: set[int] = {5575, 16467, 16465, 16470}
 
 
 def _is_exec_manager(user: CurrentUser) -> bool:
@@ -81,8 +81,7 @@ def _is_exec_manager(user: CurrentUser) -> bool:
     True only for exec-level *managers* — the audience for the company-wide
     Overview tab. Reuses EXEC_USER_IDS (the same set that governs company-wide
     people search) but additionally requires the user to actually be a manager
-    (have direct reports), so non-manager execs (QA/dev impersonators) don't get
-    a company-wide dashboard. Today this resolves to Pradeep Menon (5575) alone.
+    (have direct reports). Today this resolves to Pradeep Menon (5575) alone.
     """
     return (
         user.classmate_user_id in EXEC_USER_IDS
@@ -258,28 +257,6 @@ def _prewarm_manager_people_cache(chunk_size: int = 20):
         )
 
     logger.info("manager people pre-warm complete")
-
-
-def _init_exec_users():
-    global EXEC_USER_IDS
-    from core.queries import _DEDUP_CTE
-    try:
-        placeholders = ",".join("?" * len(EXEC_USER_NAMES))
-        rows = _query(
-            _DEDUP_CTE + f"""
-            SELECT user_id
-            FROM latest_profiles
-            WHERE rn = 1
-              AND LOWER(TRIM(display_name))
-                  IN ({placeholders})
-            """,
-            tuple(EXEC_USER_NAMES),
-        )
-        for r in rows:
-            EXEC_USER_IDS.add(r["user_id"])
-        logger.info("Exec user_ids resolved: %s", EXEC_USER_IDS)
-    except Exception as exc:
-        logger.warning("Could not resolve exec user_ids: %s", exc)
 
 
 # ── Placeholder data ──────────────────────────────────────────────────────────
@@ -938,6 +915,7 @@ def _compute_manager_team_snapshot() -> list:
         except Exception:
             name = f"Manager {mgr_id}"
         result.append({
+            "manager_id":        mgr_id,        # kept so the radar-overlay helper can re-fetch members
             "name":              name,
             "headcount":         n,
             "avg_skill_pct":     shrunk_skill,   # shrunk score — what the leaderboard ranks/shows
@@ -951,6 +929,43 @@ def _compute_manager_team_snapshot() -> list:
     logger.info("team_leaderboard: complete — %d manager teams", len(result))
     _team_snapshot_computing = False
     return result
+
+
+def _get_top_teams_with_radar() -> list:
+    """Full 5-axis radar for the Top 5 leaderboard teams, for the "compare with
+    top team" overlay on the Your Team page. Self-caching under "top_teams_radar"
+    (25h) — identical for every manager (it's the company top 5), so it's computed
+    once and read thereafter. Cheap: only 5 teams' worth of already-warm
+    classify_{uid} data via get_team_skill_radar."""
+    from nova_db.gpt_cache import get_cache, set_cache
+    from services.skill_service import get_team_skill_radar
+
+    cached = get_cache("top_teams_radar")
+    if cached:
+        return cached["result"]
+
+    snapshot = _compute_manager_team_snapshot()  # returns cached list if warm
+    out = []
+    for team in snapshot[:5]:
+        mgr_id = team.get("manager_id")
+        if mgr_id is None:
+            continue
+        try:
+            reports = get_direct_reports(None, mgr_id)
+            uids = [r["user_id"] for r in reports]
+            radar = get_team_skill_radar(uids)
+            out.append({
+                "manager_id":    mgr_id,
+                "name":          team.get("name"),
+                "avg_skill_pct": team.get("avg_skill_pct"),
+                "axes":          radar.get("axes"),
+                "this_month":    radar.get("this_month"),
+            })
+        except Exception as exc:
+            logger.warning("top_teams_radar: failed for mgr %s: %s", mgr_id, exc)
+
+    set_cache("top_teams_radar", out, "computed", ttl_hours=25)
+    return out
 
 
 _region_snapshot_computing = False  # guard against concurrent region snapshot recomputes
@@ -1200,14 +1215,41 @@ def _fuzzy_filter(rows: list, q: str) -> list:
     return ([r for _, r in exact] + [r for _, r in token_match] + fuzzy_match)[:50]
 
 
-def _search_direct_reports(mgr_id: int, q: str) -> list:
-    reports = get_direct_reports(None, mgr_id)
-    return _fuzzy_filter(reports, q)
-
-
-def _search_recursive(mgr_id: int, q: str) -> list:
-    # Synapse SQL does not support recursive CTEs — fall back to company-wide search.
-    return _search_company_wide(q)
+def _search_recursive_org(mgr_id: int, q: str) -> list:
+    """Search everyone in a manager's org subtree — direct AND indirect reports,
+    walking the `manager` field transitively. Derived from _DEDUP_CTE (promoted to
+    WITH RECURSIVE) so the active/non-TMP dedup filter stays identical; an `org`
+    CTE seeds from mgr_id's direct reports and recurses down. UNION (not UNION ALL)
+    dedupes visited user_ids, so a cyclic manager-chain in the source can't loop
+    forever — the walk is bounded by the number of distinct people."""
+    from core.queries import _DEDUP_CTE
+    cte = _DEDUP_CTE.replace("WITH latest_profiles", "WITH RECURSIVE latest_profiles", 1)
+    rows = _query(
+        cte + """,
+        org(user_id) AS (
+            SELECT user_id FROM latest_profiles WHERE rn = 1 AND manager = ?
+            UNION
+            SELECT ep.user_id
+            FROM   latest_profiles ep
+            JOIN   org ON ep.manager = org.user_id
+            WHERE  ep.rn = 1
+        )
+        SELECT ep.user_id,
+            LOWER(TRIM(ep.display_name))     AS name,
+            LOWER(TRIM(ep.department_code))  AS department,
+            LOWER(TRIM(ep.designation_code)) AS designation
+        FROM latest_profiles ep
+        JOIN org ON org.user_id = ep.user_id
+        WHERE ep.rn = 1
+        ORDER BY ep.display_name
+        """,
+        (mgr_id,),
+    )
+    for r in rows:
+        for f in ("name", "department", "designation"):
+            if r.get(f):
+                r[f] = r[f].title()
+    return _fuzzy_filter(rows, q)
 
 
 def _search_company_wide(q: str) -> list:
@@ -1465,8 +1507,8 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
     from services.skill_service import get_team_skill_scores
     from nova_db.gpt_cache import get_cache, set_cache
 
-    # v2 = payload now carries streak_days + designation (was streak:0).
-    _cache_key = f"people_list_v2_{mgr_id}_{filter_val}"
+    # v3 = payload now also carries active_days_total (for the scatter plot).
+    _cache_key = f"people_list_v3_{mgr_id}_{filter_val}"
     _cached = get_cache(_cache_key)
     if _cached:
         return _cached["result"]
@@ -1507,6 +1549,36 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
         uid_last_active = {r["user_id"]: r["last_date"] for r in last_rows}
     except Exception:
         pass
+
+    # All-time distinct active days per person (for the Team Landscape scatter's
+    # y-axis). Same 3-source activity union streak_service uses, but with NO date
+    # cap (streaks window to 30/90/365 days; this is lifetime). date() the raw
+    # timestamps and COUNT(DISTINCT) so multiple same-day events count once.
+    uid_active_days: dict = {}
+    try:
+        ad_rows = _query(
+            f"""
+            SELECT user_id, COUNT(DISTINCT activity_date) AS days FROM (
+                SELECT user_id, date(credit_date) AS activity_date
+                FROM   fact_classmate_learning_credit
+                WHERE  user_id IN ({placeholders}) AND is_deleted = 0 AND duration > 0
+                UNION
+                SELECT user_id, date(modified_on)
+                FROM   fact_classmate_user_skill_status
+                WHERE  user_id IN ({placeholders}) AND is_deleted = 0 AND is_active = 1
+                UNION
+                SELECT user_id, date(attended_date)
+                FROM   fact_classmate_self_study
+                WHERE  user_id IN ({placeholders}) AND status = 2 AND is_deleted = 0
+            ) src
+            WHERE activity_date IS NOT NULL
+            GROUP BY user_id
+            """,
+            tuple(uids) * 3,
+        )
+        uid_active_days = {r["user_id"]: int(r["days"] or 0) for r in ad_rows}
+    except Exception as exc:
+        logger.warning("_build_people_list: active-days query failed: %s", exc)
 
     try:
         team_norm = get_team_skill_scores(uids)
@@ -1561,6 +1633,7 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
             "tier":                 emp_tier,
             "credits_this_quarter": round(emp_credits, 1),
             "streak_days":          int(uid_streaks.get(uid, 0)),
+            "active_days_total":    int(uid_active_days.get(uid, 0)),
             "ai_proficiency":       ai_proficiency,
             "status":               emp_status,
             "last_active":          last_active_str,
@@ -1617,6 +1690,7 @@ def _compute_your_team(mgr_id: int) -> dict:
         "badges": badge_summary,
         "active_this_week": _get_team_active_this_week(uids),
         "courses_this_week": _get_team_courses_completed_this_week(uids),
+        "top_teams": _get_top_teams_with_radar(),
     }
     set_cache(f"your_team_v3_{mgr_id}", result, "computed", ttl_hours=25)
     return result
@@ -1642,6 +1716,7 @@ async def manager_your_team(
         employees = await _run(_overlay_current_tiers, employees)
         extras    = _swr(f"your_team_v3_{mgr_id}", partial(_compute_your_team, mgr_id),
                          {"team_size": 0, "active_this_week": 0, "courses_this_week": 0,
+                          "top_teams": [],
                           "radar": {"axes": ["AI", "Cloud", "Frontend", "Backend", "Data"],
                                     "this_month": [0.0] * 5, "last_month": [0.0] * 5},
                           "badges": {"total": 0, "avg_per_person": 0.0, "this_month_count": 0,
@@ -1658,6 +1733,7 @@ async def manager_your_team(
         "active_this_week":  extras.get("active_this_week", 0),
         "courses_this_week": extras.get("courses_this_week", 0),
         "team_size":         extras.get("team_size", len(employees)),
+        "top_teams":         extras.get("top_teams", []),
     }
 
 
@@ -1665,44 +1741,59 @@ async def manager_your_team(
 async def manager_people_search(
     request: Request,
     q: str = Query("", min_length=0, max_length=100),
+    scope: str = Query("", max_length=20),
     user: CurrentUser = Depends(get_current_user),
 ):
-    # When impersonating, get_current_user returns the impersonated user's identity.
-    # Read X-Nova-Dev-User directly so the exec's identity is used for auth checks.
-    dev_header = request.headers.get("X-Nova-Dev-User")
-    signed_in_uid = int(dev_header) if dev_header and dev_header.isdigit() else user.classmate_user_id
+    """Two distinct callers hit this endpoint:
 
-    if signed_in_uid not in EXEC_USER_IDS:
-        _require_manager(user)
+    - scope="impersonate": the ⚡ dev-impersonation panel. The REAL signed-in dev
+      (X-Nova-Dev-User) is finding someone to view-as — always company-wide,
+      independent of who they're currently impersonating, so they can reach anyone.
+      Gated on the real dev identity being an exec.
+    - default: the manager page "Individual Progress" search. Keyed off the
+      EFFECTIVE profile (the impersonated user when impersonating, else the real
+      user) so impersonation faithfully shows that role's real experience — exec
+      profiles get company-wide, every other manager gets their org subtree
+      (direct + indirect reports)."""
     if not q or not q.strip():
         return {"employees": [], "search_scope": "none"}
-
-    uid     = signed_in_uid
     q_lower = q.strip().lower()
 
-    if uid is None:
+    # ── Dev-impersonation panel: always company-wide for an exec dev ──────────
+    if scope == "impersonate":
+        dev_header = request.headers.get("X-Nova-Dev-User")
+        signed_in_uid = int(dev_header) if dev_header and dev_header.isdigit() else user.classmate_user_id
+        if signed_in_uid not in EXEC_USER_IDS:
+            raise HTTPException(status_code=403, detail="Not authorized for dev search")
+        try:
+            rows     = await _run(_search_company_wide, q_lower)
+            uids     = [r["user_id"] for r in rows]
+            enriched = await _run(_enrich_search_results, uids, rows)
+        except Exception as exc:
+            logger.warning("Dev search failed q=%s: %s", q, exc)
+            return {"employees": [], "search_scope": "error"}
+        return {"employees": enriched, "search_scope": "company"}
+
+    # ── Manager page: scope reflects the effective (impersonated) profile ─────
+    eff_uid = user.classmate_user_id
+    if eff_uid is None:
         return {"employees": [], "search_scope": "dev"}
+    if eff_uid not in EXEC_USER_IDS:
+        _require_manager(user)
 
     try:
-        if uid in EXEC_USER_IDS and uid in RECURSIVE_USER_IDS:
-            try:
-                rows  = await _run(_search_recursive, uid, q_lower)
-                scope = "recursive"
-            except Exception:
-                rows  = await _run(_search_company_wide, q_lower)
-                scope = "company"
-        elif uid in EXEC_USER_IDS:
+        if eff_uid in EXEC_USER_IDS:        # exec profile → whole company
             rows  = await _run(_search_company_wide, q_lower)
-            scope = "company"
-        else:
-            rows  = await _run(_search_direct_reports, uid, q_lower)
-            scope = "direct"
+            scope_out = "company"
+        else:                               # any other manager → their org subtree
+            rows  = await _run(_search_recursive_org, eff_uid, q_lower)
+            scope_out = "recursive"
 
         uids     = [r["user_id"] for r in rows]
         enriched = await _run(_enrich_search_results, uids, rows)
 
     except Exception as exc:
-        logger.warning("Search failed uid=%s q=%s: %s", uid, q, exc)
+        logger.warning("Search failed uid=%s q=%s: %s", eff_uid, q, exc)
         return {"employees": [], "search_scope": "error"}
 
-    return {"employees": enriched, "search_scope": scope}
+    return {"employees": enriched, "search_scope": scope_out}

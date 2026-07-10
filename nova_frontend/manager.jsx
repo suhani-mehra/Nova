@@ -116,8 +116,11 @@ function TeamLeaderboard({rows}){
   // True competitive rank (1 = highest score), stable regardless of the display
   // sort direction or an active search filter.
   const ranked = rows.slice().sort((a,b)=>b.prof-a.prof).map((t,i)=>Object.assign({}, t, {rank:i+1}));
+  const isSearching = q.trim().length > 0;
   let list = _leaderboardFuzzy(ranked, q);
-  list = list.slice().sort((a,b)=> asc ? (a.prof-b.prof) : (b.prof-a.prof));
+  // While searching, keep _leaderboardFuzzy's best-match-first order — the sort
+  // toggle only applies to the full (unsearched) leaderboard.
+  if(!isSearching) list = list.slice().sort((a,b)=> asc ? (a.prof-b.prof) : (b.prof-a.prof));
 
   return h('div',null,
     // controls: fuzzy search + sort-direction toggle
@@ -132,11 +135,12 @@ function TeamLeaderboard({rows}){
         q && h('button',{onClick:()=>setQ(''),
           style:{position:'absolute',right:7,top:'50%',transform:'translateY(-50%)',background:'none',border:0,
             color:'var(--muted)',fontSize:16,cursor:'pointer',lineHeight:1,padding:'0 2px'}},'\xD7')),
-      h('button',{className:'lb-sort-btn', onClick:()=>setAsc(a=>!a), title:'Toggle sort order',
+      h('button',{className:'lb-sort-btn', onClick:()=>setAsc(a=>!a), disabled:isSearching,
+        title:isSearching?'Search results are ordered by best match':'Toggle sort order',
         style:{flex:'0 0 auto',display:'flex',alignItems:'center',gap:5,padding:'8px 11px',borderRadius:10,
           border:'1.5px solid var(--line)',background:'var(--card)',color:'var(--ink)',fontSize:12,fontWeight:700,
-          cursor:'pointer',whiteSpace:'nowrap'}},
-        asc ? 'Low → High' : 'High → Low')),
+          cursor:isSearching?'not-allowed':'pointer',opacity:isSearching?.45:1,whiteSpace:'nowrap'}},
+        isSearching ? 'Best match' : (asc ? 'Low → High' : 'High → Low'))),
 
     // scrollable ranked list — all teams, not just the top 6
     h('div',{className:'leader-scroll',style:{maxHeight:360,overflowY:'auto',scrollbarWidth:'thin'}},
@@ -238,9 +242,13 @@ function MgrYourTeam(){
   const [searchResults,setSearchResults]=useStateM(null);
   const [searching,setSearching]=useStateM(false);
   const [searchScope,setSearchScope]=useStateM('');
+  const [compareTeam,setCompareTeam]=useStateM(null);
+  const [comparePicker,setComparePicker]=useStateM(false);
+  const [selectedId,setSelectedId]=useStateM(null);
   const debounceRef=React.useRef(null);
 
   const people=T.people||[];
+  const topTeams=T.topTeams||[];
   const filtered = people.filter(p=>{
     if(filter==='all') return true;
     if(filter==='on_track') return p.status==='ok';
@@ -265,10 +273,34 @@ function MgrYourTeam(){
   const isSearching=searchQ.trim().length>0;
   const displayList=isSearching?(searchResults||[]):filtered;
 
+  // Scatter always shows the FULL team (ignores filter/search), one dot per report.
+  const scatterPoints=people.map(p=>{
+    const prof=(p.prof!=null)?p.prof:Math.round(p.ai_proficiency||0);
+    return {id:p.user_id, name:p.name, x:prof, y:p.activeDays||0, atRisk:(p.status==='risk')||prof<20};
+  });
+
+  // Two-way selection between scatter and table.
+  const onSelectPerson=(id)=>{
+    if(selectedId===id){ setSelectedId(null); return; }
+    const visible=displayList.some(p=>p.user_id===id);
+    if(!visible){ setFilter('all'); setSearchQ(''); }  // reveal a filtered/searched-out person
+    setSelectedId(id);
+  };
+
+  // Scroll the selected person's row into view (retry once after re-render, since
+  // clearing a filter/search re-renders the table).
+  React.useEffect(()=>{
+    if(selectedId==null) return;
+    const scroll=()=>{ const el=document.getElementById('ppl-row-'+selectedId);
+      if(el){ el.scrollIntoView({behavior:'smooth',block:'center'}); return true; } return false; };
+    if(scroll()) return;
+    const t=setTimeout(scroll,90);
+    return ()=>clearTimeout(t);
+  },[selectedId]);
+
   const radar=T.radar;
   const badges=T.badges||{total:0,avgPerPerson:0,thisMonthCount:0,byTier:{}};
   const active=T.activeThisWeek||{count:0,total:T.size,pct:0};
-  const coursesThisWeek=T.coursesThisWeek||0;
 
   return h('div',{className:'page'},
     h('div',{className:'page-head'},
@@ -280,11 +312,24 @@ function MgrYourTeam(){
       h('div',{className:'card mgr-team-radar'},
         h('div',{className:'card-title'},'Team Average Proficiency'),
         h('div',{className:'card-sub'},'Mean proficiency across your team in each skill category.'),
-        radar ? h(RadarChart,{axes:radar.axes, thisMonth:_mgrRadarShift(radar.this_month), lastMonth:_mgrRadarShift(radar.last_month), labelValues:radar.this_month, size:280})
+        radar ? h(RadarChart,{axes:radar.axes, thisMonth:_mgrRadarShift(radar.this_month), lastMonth:_mgrRadarShift(radar.last_month),
+                  compareWith: compareTeam?_mgrRadarShift(compareTeam.this_month):null, labelValues:radar.this_month, size:280})
               : h('div',{style:{padding:'40px 0',textAlign:'center',color:'var(--muted)',fontWeight:600}},'No skill data yet.'),
         h('div',{className:'chart-legend', style:{justifyContent:'center',marginTop:8}},
           h('div',{className:'it'}, h('span',{style:{width:14,height:14,borderRadius:4,background:'#A634FF',display:'inline-block'}}),'This month'),
-          h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#2ACCFF'}}),'Last month'))),
+          h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#2ACCFF'}}),'Last month'),
+          compareTeam && h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#1FA971'}}), compareTeam.name)),
+        topTeams.length>0 && h('div',{className:'compare-wrap'},
+          h('button',{className:'btn-compare',onClick:()=>setComparePicker(o=>!o)},
+            Icons.users({size:14}),
+            comparePicker ? 'Cancel' : (compareTeam ? 'Change' : 'Compare with top team')),
+          compareTeam && !comparePicker && h('button',{className:'btn-compare-clear',onClick:()=>setCompareTeam(null)},
+            '✕ Clear comparison'),
+          comparePicker && h('div',{className:'compare-picker'},
+            topTeams.map(t=>h('button',{key:t.manager_id, className:'compare-opt',
+              onClick:()=>{ setCompareTeam(t); setComparePicker(false); }},
+              h('span',{style:{fontWeight:800,flex:1,textAlign:'left'}}, t.name),
+              h('span',{style:{color:'var(--muted)',fontWeight:700}}, t.avgSkill+'%')))))),
       h('div',{className:'card mgr-team-badges', style:{display:'flex',flexDirection:'column'}},
         h('div',{className:'card-title', style:{marginBottom:6}},'Badges by tier'),
         h('div',{className:'card-sub', style:{marginBottom:16}},'Every badge your team has earned.'),
@@ -294,14 +339,14 @@ function MgrYourTeam(){
               name:(tierByKey(k)||{}).name||k, color:(tierByKey(k)||{}).color||'#9aa2b1', value:badges.byTier[k]||0})),
             centerValue:badges.total, centerLabel:'badges', size:180}))),
       h('div',{className:'mgr-team-rail'},
-        h('div',{className:'hero-card hero-purple hero-compact'},
-          h('div',{className:'hero-lab'}, Icons.users({size:16,color:'#fff'}), 'Active learners this week'),
-          h('div',{className:'hero-num hero-num-sm'}, _fmtN(active.count)),
-          h('div',{className:'hero-sub'}, `${active.pct.toFixed(1)}% of ${active.total} direct report${active.total===1?'':'s'}`)),
-        h('div',{className:'hero-card hero-blue hero-fill'},
-          h('div',{className:'hero-lab'}, Icons.book({size:16,color:'#fff'}), 'Courses completed this week'),
-          h('div',{className:'hero-num hero-num-sm'}, _fmtN(coursesThisWeek)),
-          h('div',{className:'hero-sub'}, `across ${active.total} direct report${active.total===1?'':'s'}`)))
+        h('div',{className:'hero-card hero-purple hero-mini'},
+          h('div',{className:'hero-lab'}, Icons.users({size:15,color:'#fff'}), 'Active learners this week'),
+          h('div',{className:'hero-num hero-num-sm'}, _fmtN(active.count))),
+        h('div',{className:'card mgr-team-scatter', style:{flex:1,display:'flex',flexDirection:'column'}},
+          h('div',{className:'card-title'},'Team Landscape'),
+          h('div',{className:'card-sub', style:{marginBottom:8}},'Each dot is a teammate — AI proficiency vs. total active days.'),
+          h('div',{style:{flex:1,display:'flex',alignItems:'center'}},
+            h(ScatterChart,{points:scatterPoints, selectedId, onSelect:onSelectPerson, compact:true}))))
     ),
 
     // people table
@@ -347,7 +392,8 @@ function MgrYourTeam(){
         const prof=(p.prof!=null)?p.prof:Math.round(p.ai_proficiency||0);
         const streak=(p.streak!=null)?p.streak:(p.streak_days||0);
         const atRisk=prof<20;
-        return h('div',{className:'ppl-row',key:p.user_id||i},
+        return h('div',{className:'ppl-row'+(p.user_id===selectedId?' selected':''), key:p.user_id||i,
+            id:'ppl-row-'+(p.user_id||i), onClick:()=>onSelectPerson(p.user_id), style:{cursor:'pointer'}},
           h('div',{className:'who'},
             h(Avatar,{name:p.name, grad:p.av||['#A634FF','#FF4398'], size:'s'}),
             h('div',{style:{minWidth:0}},

@@ -246,4 +246,64 @@ function DonutChart({segments, centerValue, centerLabel, size=180}){
 }
 function _fmtNum(n){ return Math.round(n||0).toLocaleString(); }
 
-Object.assign(window,{TierTrack, RadarChart, LineChart, RegionProficiencyChart, DonutChart});
+/* ---------- Team Landscape scatter (Your Team page) ----------
+   One dot per direct report: x = AI proficiency (0-100), y = total all-time
+   active days. Hover → name tooltip; click → onSelect(id) for two-way highlight
+   with the people table. Sized compactly for the narrow rail (~320-360px). */
+function ScatterChart({points, selectedId, onSelect, compact}){
+  const [hover,setHover]=_useState(null);
+  const pts = points || [];
+  const W=360, H=300, padL=38, padR=16, padT=16, padB=42;
+  const maxDays = Math.max(5, ...pts.map(p=>p.y||0));
+  const yTop = Math.ceil(maxDays);
+  const ix = x => padL + (Math.max(0,Math.min(100,x))/100) * (W-padL-padR);
+  const iy = y => padT + (1 - (yTop? (y/yTop):0)) * (H-padT-padB);
+  const xticks=[0,25,50,75,100];
+  // 4-5 integer y gridlines
+  const ySteps = Math.min(5, yTop);
+  const yticks = [];
+  for(let i=0;i<=ySteps;i++) yticks.push(Math.round(yTop*i/ySteps));
+  const uniqY = [...new Set(yticks)];
+  const fs = compact ? 9.5 : 11.5;
+
+  if(!pts.length){
+    return h('div',{style:{padding:'28px 6px',color:'var(--muted)',fontSize:13,fontWeight:600,textAlign:'center'}},'No team data yet.');
+  }
+
+  const hoverPt = hover!=null ? pts.find(p=>p.id===hover) : null;
+
+  return h('div',{style:{position:'relative'}},
+    h('svg',{viewBox:`0 0 ${W} ${H}`, width:'100%', onMouseLeave:()=>setHover(null)},
+      // y grid + labels
+      uniqY.map(t=>h('g',{key:'y'+t},
+        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t),stroke:'var(--chart-grid)',strokeWidth:1}),
+        h('text',{x:padL-8,y:iy(t)+4,textAnchor:'end',fontSize:fs,fontWeight:600,fill:'var(--chart-label)'}, t+'d')
+      )),
+      // x ticks + labels
+      xticks.map(t=>h('text',{key:'x'+t,x:ix(t),y:H-padB+20,textAnchor:'middle',fontSize:fs,fontWeight:600,fill:'var(--chart-label)'}, t+'%')),
+      // axis titles
+      h('text',{x:(padL+(W-padR))/2,y:H-6,textAnchor:'middle',fontSize:fs,fontWeight:800,fill:'var(--chart-label)'}, 'AI proficiency'),
+      h('text',{x:12,y:padT-4,textAnchor:'start',fontSize:fs,fontWeight:800,fill:'var(--chart-label)'}, 'Active days'),
+      // points (selected drawn last so its ring sits on top)
+      pts.map(p=>{
+        if(p.id===selectedId) return null;
+        const isHover = p.id===hover;
+        const color = p.atRisk ? '#E23D6E' : '#A634FF';
+        return h('circle',{key:'pt'+p.id, cx:ix(p.x), cy:iy(p.y), r:isHover?6:4.2,
+          fill:color, fillOpacity:.85, stroke:'#fff', strokeWidth:isHover?1.6:1,
+          style:{cursor:'pointer'}, onMouseEnter:()=>setHover(p.id), onMouseLeave:()=>setHover(null),
+          onClick:()=>onSelect&&onSelect(p.id)});
+      }),
+      pts.filter(p=>p.id===selectedId).map(p=>h('circle',{key:'sel'+p.id, cx:ix(p.x), cy:iy(p.y), r:7,
+        fill:(p.atRisk?'#E23D6E':'#A634FF'), stroke:'#fff', strokeWidth:2.6,
+        style:{cursor:'pointer'}, onClick:()=>onSelect&&onSelect(p.id)}))
+    ),
+    hoverPt && h('div',{className:'chart-tip',
+      style:{left:`${(ix(hoverPt.x)/W)*100}%`, top:`${(iy(hoverPt.y)/H)*100}%`}},
+      h('div',{className:'t1'}, hoverPt.name),
+      h('div',{className:'row'}, h('span',{className:'dot',style:{background:hoverPt.atRisk?'#E23D6E':'#A634FF'}}),
+        `AI ${Math.round(hoverPt.x)}% · ${hoverPt.y} active day${hoverPt.y===1?'':'s'}`))
+  );
+}
+
+Object.assign(window,{TierTrack, RadarChart, LineChart, RegionProficiencyChart, DonutChart, ScatterChart});

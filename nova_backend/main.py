@@ -66,11 +66,6 @@ async def lifespan(app: FastAPI):
         logger.info("Warehouse OK")
         print("\n✓ Warehouse OK\n")
         try:
-            from routers.manager import _init_exec_users
-            loop.run_in_executor(None, _init_exec_users)
-        except Exception as exc:
-            logger.warning("Could not schedule exec user lookup: %s", exc)
-        try:
             from routers.manager import (
                 _prewarm_classify_cache,
                 _prewarm_streak_cache,
