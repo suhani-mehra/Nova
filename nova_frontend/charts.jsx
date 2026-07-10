@@ -1,6 +1,18 @@
 /* ===================== Nova — charts ===================== */
 const { useState:_useState } = React;
 
+/* Clamp a chart tooltip so it never clips at the card edges. Given the point's
+   fractional position (0–1) in the viewBox, returns {left, top, transform}:
+   anchors the tip left/center/right near the sides and flips it below the point
+   near the top. Shared by every chart (and VerticalBars in manager.jsx). */
+function _tipStyle(fx, fy){
+  fx = Math.max(0, Math.min(1, fx));
+  fy = Math.max(0, Math.min(1, fy));
+  const tx = fx < 0.18 ? '4px' : fx > 0.82 ? 'calc(-100% - 4px)' : '-50%';
+  const ty = fy < 0.22 ? '10px' : '-115%';
+  return { left: (fx*100)+'%', top: (fy*100)+'%', transform: `translate(${tx}, ${ty})` };
+}
+
 /* ---------- Tier progression track ---------- */
 function TierTrack({tiers, currentKey}){
   const curIdx = tiers.findIndex(t=>t.key===currentKey);
@@ -98,7 +110,7 @@ function LineChart({months, proficiency, active, target, total}){
         width:(W-padL-padR)/(months.length-1),height:H,fill:'transparent',onMouseEnter:()=>setHover(i)}))
     ),
     hover!==null && h('div',{className:'chart-tip',
-      style:{left:`${(ix(hover)/W)*100}%`, top:`${(iy(proficiency[hover])/H)*100}%`}},
+      style:_tipStyle(ix(hover)/W, iy(proficiency[hover])/H)},
       h('div',{className:'t1'}, months[hover]),
       h('div',{className:'row'}, h('span',{className:'dot',style:{background:'#A634FF'}}),
         `AI-proficient ${proficiency[hover]}% · ${Math.round(total*proficiency[hover]/100).toLocaleString()}`),
@@ -159,7 +171,7 @@ function RegionProficiencyChart({data}){
               fill:r.color, opacity:isActive?1:0.88,
               stroke:isActive?'#fff':'rgba(255,255,255,.22)', strokeWidth:isActive?2:1,
               style:{cursor:'pointer',transition:'opacity .15s'},
-              onMouseEnter:()=>setHover({li,rkey:r.key})}),
+              onMouseEnter:()=>setHover({li,rkey:r.key}), onMouseLeave:()=>setHover(null)}),
             pct>0 && h('text',{x:x+barW/2, y:yTop-5, textAnchor:'middle',
               fontSize:9.5,fontWeight:800,fill:r.color}, Math.round(pct)+'%')
           );
@@ -195,9 +207,9 @@ function RegionProficiencyChart({data}){
       const lv=levels[hover.li];
       const r=regionByKey[hover.rkey];
       const seg=lv.regions[hover.rkey]||{};
-      const lx=((groupLeft(hover.li)+(r? regions.indexOf(r)*(barW+barGap):0)+barW/2)/W)*100;
-      const ty=(iy(seg.pct_of_region||0)/H)*100;
-      return h('div',{className:'chart-tip',style:{left:lx+'%',top:ty+'%'}},
+      const lx=(groupLeft(hover.li)+(r? regions.indexOf(r)*(barW+barGap):0)+barW/2)/W;
+      const ty=iy(seg.pct_of_region||0)/H;
+      return h('div',{className:'chart-tip',style:_tipStyle(lx, ty)},
         h('div',{className:'t1'}, (r?r.label:hover.rkey)+' · '+lv.name),
         h('div',{className:'row'}, h('span',{className:'dot',style:{background:r?r.color:'#999'}}),
           (seg.pct_of_region||0)+'% of '+(r?r.label:'')+' at '+lv.name),
@@ -247,24 +259,24 @@ function DonutChart({segments, centerValue, centerLabel, size=180}){
 function _fmtNum(n){ return Math.round(n||0).toLocaleString(); }
 
 /* ---------- Team Landscape scatter (Your Team page) ----------
-   One dot per direct report: x = AI proficiency (0-100), y = total all-time
-   active days. Hover → name tooltip; click → onSelect(id) for two-way highlight
-   with the people table. Sized compactly for the narrow rail (~320-360px). */
+   One dot per direct report: x = total all-time active days, y = AI proficiency
+   (0-100). Hover → name tooltip; click → onSelect(id) for two-way highlight with
+   the people table. Sized compactly for the narrow rail (~320-360px). */
 function ScatterChart({points, selectedId, onSelect, compact}){
   const [hover,setHover]=_useState(null);
   const pts = points || [];
-  const W=360, H=300, padL=38, padR=16, padT=16, padB=42;
-  const maxDays = Math.max(5, ...pts.map(p=>p.y||0));
-  const yTop = Math.ceil(maxDays);
-  const ix = x => padL + (Math.max(0,Math.min(100,x))/100) * (W-padL-padR);
-  const iy = y => padT + (1 - (yTop? (y/yTop):0)) * (H-padT-padB);
-  const xticks=[0,25,50,75,100];
-  // 4-5 integer y gridlines
-  const ySteps = Math.min(5, yTop);
-  const yticks = [];
-  for(let i=0;i<=ySteps;i++) yticks.push(Math.round(yTop*i/ySteps));
-  const uniqY = [...new Set(yticks)];
+  const W=360, H=300, padL=52, padR=16, padT=16, padB=42;
+  const Y_TOP = 110;   // proficiency axis: 0–100 ticks + headroom so top dots aren't clipped
+  const maxDays = Math.max(5, ...pts.map(p=>p.x||0));
+  const xTop = Math.ceil(maxDays) + 1;
+  const ix = x => padL + (Math.max(0,x)/xTop) * (W-padL-padR);
+  const iy = y => padT + (1 - Math.min(100,Math.max(0,y))/Y_TOP) * (H-padT-padB);
+  const yticks=[0,25,50,75,100];
+  const xSteps = 5;
+  const xticks=[]; for(let i=0;i<=xSteps;i++) xticks.push(Math.round(xTop*i/xSteps));
+  const uniqX = [...new Set(xticks)];
   const fs = compact ? 9.5 : 11.5;
+  const midY=(padT+(H-padB))/2;
 
   if(!pts.length){
     return h('div',{style:{padding:'28px 6px',color:'var(--muted)',fontSize:13,fontWeight:600,textAlign:'center'}},'No team data yet.');
@@ -274,16 +286,16 @@ function ScatterChart({points, selectedId, onSelect, compact}){
 
   return h('div',{style:{position:'relative'}},
     h('svg',{viewBox:`0 0 ${W} ${H}`, width:'100%', onMouseLeave:()=>setHover(null)},
-      // y grid + labels
-      uniqY.map(t=>h('g',{key:'y'+t},
+      // y grid + labels (%)
+      yticks.map(t=>h('g',{key:'y'+t},
         h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t),stroke:'var(--chart-grid)',strokeWidth:1}),
-        h('text',{x:padL-8,y:iy(t)+4,textAnchor:'end',fontSize:fs,fontWeight:600,fill:'var(--chart-label)'}, t+'d')
+        h('text',{x:padL-7,y:iy(t)+4,textAnchor:'end',fontSize:fs,fontWeight:600,fill:'var(--chart-label)'}, t+'%')
       )),
-      // x ticks + labels
-      xticks.map(t=>h('text',{key:'x'+t,x:ix(t),y:H-padB+20,textAnchor:'middle',fontSize:fs,fontWeight:600,fill:'var(--chart-label)'}, t+'%')),
-      // axis titles
-      h('text',{x:(padL+(W-padR))/2,y:H-6,textAnchor:'middle',fontSize:fs,fontWeight:800,fill:'var(--chart-label)'}, 'AI proficiency'),
-      h('text',{x:12,y:padT-4,textAnchor:'start',fontSize:fs,fontWeight:800,fill:'var(--chart-label)'}, 'Active days'),
+      // x ticks + labels (days)
+      uniqX.map(t=>h('text',{key:'x'+t,x:ix(t),y:H-padB+20,textAnchor:'middle',fontSize:fs,fontWeight:600,fill:'var(--chart-label)'}, t+'d')),
+      // axis titles — x below (horizontal), y rotated sideways in the left gutter
+      h('text',{x:(padL+(W-padR))/2,y:H-6,textAnchor:'middle',fontSize:fs,fontWeight:800,fill:'var(--chart-label)'}, 'Active days'),
+      h('text',{transform:`rotate(-90 11 ${midY})`,x:11,y:midY,textAnchor:'middle',fontSize:fs,fontWeight:800,fill:'var(--chart-label)'}, 'AI proficiency'),
       // points (selected drawn last so its ring sits on top)
       pts.map(p=>{
         if(p.id===selectedId) return null;
@@ -291,19 +303,87 @@ function ScatterChart({points, selectedId, onSelect, compact}){
         const color = p.atRisk ? '#E23D6E' : '#A634FF';
         return h('circle',{key:'pt'+p.id, cx:ix(p.x), cy:iy(p.y), r:isHover?6:4.2,
           fill:color, fillOpacity:.85, stroke:'#fff', strokeWidth:isHover?1.6:1,
-          style:{cursor:'pointer'}, onMouseEnter:()=>setHover(p.id), onMouseLeave:()=>setHover(null),
+          style:{cursor:'pointer',transition:'r .12s'}, onMouseEnter:()=>setHover(p.id), onMouseLeave:()=>setHover(null),
           onClick:()=>onSelect&&onSelect(p.id)});
       }),
       pts.filter(p=>p.id===selectedId).map(p=>h('circle',{key:'sel'+p.id, cx:ix(p.x), cy:iy(p.y), r:7,
         fill:(p.atRisk?'#E23D6E':'#A634FF'), stroke:'#fff', strokeWidth:2.6,
         style:{cursor:'pointer'}, onClick:()=>onSelect&&onSelect(p.id)}))
     ),
-    hoverPt && h('div',{className:'chart-tip',
-      style:{left:`${(ix(hoverPt.x)/W)*100}%`, top:`${(iy(hoverPt.y)/H)*100}%`}},
+    hoverPt && h('div',{className:'chart-tip', style:_tipStyle(ix(hoverPt.x)/W, iy(hoverPt.y)/H)},
       h('div',{className:'t1'}, hoverPt.name),
       h('div',{className:'row'}, h('span',{className:'dot',style:{background:hoverPt.atRisk?'#E23D6E':'#A634FF'}}),
-        `AI ${Math.round(hoverPt.x)}% · ${hoverPt.y} active day${hoverPt.y===1?'':'s'}`))
+        `AI ${Math.round(hoverPt.y)}% · ${hoverPt.x} active day${hoverPt.x===1?'':'s'}`))
   );
 }
 
-Object.assign(window,{TierTrack, RadarChart, LineChart, RegionProficiencyChart, DonutChart, ScatterChart});
+/* ---------- Team Landscape 4-quadrant scatter ---------- */
+/* Each dot = one manager's team (clustered when close): x = avg all-time active
+   days, y = avg AI proficiency. Color = manager's continent. Crosshair at the
+   axis midpoint splits it into 4 quadrants. Hover names the manager(s) and calls
+   onHover(managerIds) so the Team Leaderboard can cross-highlight; a point is
+   emphasized when any of its managers is in highlightIds. */
+function QuadrantChart({data, highlightIds, onHover, onSelect}){
+  const [hover,setHover]=_useState(null);
+  const pts = (data && data.points) || [];
+  const maxX = (data && data.maxX) || 10;
+  const Y_TOP = 110;   // proficiency axis: 0–100 ticks, extra headroom so top dots aren't clipped
+  const W=760, H=440, padL=64, padR=20, padT=22, padB=46;
+  const ix = x => padL + (Math.max(0,x)/maxX) * (W-padL-padR);
+  const iy = y => padT + (1 - Math.min(100,Math.max(0,y))/Y_TOP) * (H-padT-padB);
+  const STEPS = 5;
+  const xticks=[];
+  for(let i=0;i<=STEPS;i++) xticks.push(Math.round(maxX*i/STEPS));
+  const yticks=[0,25,50,75,100];
+  const midY=(padT+(H-padB))/2;
+
+  const hl = new Set((highlightIds||[]).map(String));
+  const isHl = p => hl.has(String(p.manager_id));
+  const _hover = id => { setHover(id); if(onHover){ const p=pts.find(x=>x.id===id); onHover(p?[p.manager_id]:null); } };
+  const _leave = () => { setHover(null); if(onHover) onHover(null); };
+
+  if(!pts.length){
+    return h('div',{style:{padding:'40px 6px',color:'var(--muted)',fontSize:13,fontWeight:600,textAlign:'center'}},'No team data yet.');
+  }
+
+  const hoverPt = hover!=null ? pts.find(p=>p.id===hover) : null;
+  // Draw highlighted/hovered points last so they sit on top.
+  const ordered = [...pts].sort((a,b)=>((isHl(a)||a.id===hover)?1:0)-((isHl(b)||b.id===hover)?1:0));
+
+  const dot = p => {
+    const on = isHl(p) || p.id===hover;
+    const r = on?7:4.5;
+    return h('circle',{key:'pt'+p.id, cx:ix(p.x), cy:iy(p.y), r,
+      fill:p.color||'#9aa2b1', fillOpacity:on?.98:.62, stroke:'#fff', strokeWidth:on?2:.8,
+      style:{cursor:'pointer',transition:'r .1s'},
+      onMouseEnter:()=>_hover(p.id), onMouseLeave:_leave,
+      onClick:()=>onSelect&&onSelect(p.manager_id)});
+  };
+
+  return h('div',{style:{position:'relative'}},
+    h('svg',{viewBox:`0 0 ${W} ${H}`, width:'100%', onMouseLeave:_leave},
+      // y grid + labels (%)
+      yticks.map(t=>h('g',{key:'y'+t},
+        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t),stroke:'var(--chart-grid)',strokeWidth:1}),
+        h('text',{x:padL-10,y:iy(t)+4,textAnchor:'end',fontSize:11.5,fontWeight:600,fill:'var(--chart-label)'}, t+'%')
+      )),
+      // x labels (days)
+      xticks.map(t=>h('text',{key:'x'+t,x:ix(t),y:H-padB+20,textAnchor:'middle',fontSize:11.5,fontWeight:600,fill:'var(--chart-label)'}, t+'d')),
+      // quadrant crosshair (days midpoint × proficiency 50)
+      h('line',{x1:ix(maxX/2),y1:padT,x2:ix(maxX/2),y2:H-padB,stroke:'var(--chart-label)',strokeWidth:1.4,strokeDasharray:'6 5',opacity:.5}),
+      h('line',{x1:padL,y1:iy(50),x2:W-padR,y2:iy(50),stroke:'var(--chart-label)',strokeWidth:1.4,strokeDasharray:'6 5',opacity:.5}),
+      // axis titles — x below (horizontal), y rotated sideways in the left gutter
+      h('text',{x:(padL+(W-padR))/2,y:H-6,textAnchor:'middle',fontSize:12,fontWeight:800,fill:'var(--chart-label)'}, 'Active days (team avg)'),
+      h('text',{transform:`rotate(-90 18 ${midY})`,x:18,y:midY,textAnchor:'middle',fontSize:12,fontWeight:800,fill:'var(--chart-label)'}, 'AI proficiency'),
+      // points
+      ordered.map(dot)
+    ),
+    hoverPt && h('div',{className:'chart-tip', style:_tipStyle(ix(hoverPt.x)/W, iy(hoverPt.y)/H)},
+      h('div',{className:'t1'}, hoverPt.name),
+      h('div',{className:'row'}, h('span',{className:'dot',style:{background:hoverPt.color||'#9aa2b1'}}),
+        `AI ${Math.round(hoverPt.y)}% · ${hoverPt.x} active days (avg)`),
+      h('div',{className:'row'}, `${hoverPt.people} ${hoverPt.people===1?'person':'people'}`))
+  );
+}
+
+Object.assign(window,{TierTrack, RadarChart, LineChart, RegionProficiencyChart, DonutChart, ScatterChart, QuadrantChart});

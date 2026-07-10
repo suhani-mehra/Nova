@@ -13,6 +13,14 @@ function LogoMark(){
   );
 }
 
+function OILogo(){
+  // Two files, swapped by theme via CSS (.oi-light shows in light mode, .oi-dark in dark).
+  return h(React.Fragment,null,
+    h('img',{className:'oi-mark oi-light', src:'/logo-light.svg', alt:'OI Polaris'}),
+    h('img',{className:'oi-mark oi-dark',  src:'/logo-dark.svg',  alt:'OI Polaris'})
+  );
+}
+
 function ProfileMenu({account, onSwitch}){
   const [open,setOpen]=useState(false);
   const [theme,setTheme]=useState((document.documentElement.dataset.theme==='dark')?'dark':'light');
@@ -234,10 +242,7 @@ function App(){
   return h(React.Fragment,null,
     h('header',{className:'topbar'},
       h('div',{className:'brand'},
-        h(LogoMark),
-        h('div',null,
-          h('div',{className:'word'},'Nova'),
-          h('div',{className:'sub'},'by Orion'))),
+        h(OILogo)),
       h('div',{className:'tabs-wrap'},
         tabs.length > 1 && h('nav',{className:'tabs'},
           tabs.map(t=>h('button',{key:t.id, className:'tab'+(tab===t.id?' active':''),

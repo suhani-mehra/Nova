@@ -1137,6 +1137,440 @@ def _default_region_snapshot() -> dict:
     }
 
 
+# ── Proficiency by vertical (exec Overview) ───────────────────────────────────
+
+_vertical_snapshot_computing = False  # guard against concurrent recomputes
+
+
+def _compute_proficiency_by_vertical() -> dict:
+    """
+    For each business-unit industry group, the % of its employees who are
+    AI-proficient (AI axis >= ai_proficiency_min_score), ranked high→low.
+
+    Joins the employee_role table (employee_id → vertical_name) to the latest
+    active profile (employee_id → user_id), maps vertical_name → group via
+    core.verticals.group_for, and reuses the same warm classify_{uid} AI-score
+    path as _compute_ai_proficiency_by_region (no rescoring).
+
+    Returns {"verticals": [{name, pct, earners, total, top}]} sorted by pct desc
+    (earners = count AI-proficient). Cached 25 h under "proficiency_by_vertical".
+    """
+    global _vertical_snapshot_computing
+    from nova_db.gpt_cache import get_cache, set_cache
+    from core.queries import _DEDUP_CTE
+    from core.verticals import group_for
+
+    CACHE_KEY = "proficiency_by_vertical"
+    cached = get_cache(CACHE_KEY)
+    if cached:
+        _vertical_snapshot_computing = False
+        return cached["result"]
+
+    _vertical_snapshot_computing = True
+    logger.info("proficiency_by_vertical: computing company-wide vertical split")
+
+    try:
+        rows = _query(
+            _DEDUP_CTE + """
+            SELECT lp.user_id AS user_id, er.vertical_name AS vertical_name
+            FROM employee_role er
+            JOIN latest_profiles lp
+              ON UPPER(TRIM(lp.employee_id)) = UPPER(TRIM(er.employee_id))
+            WHERE lp.rn = 1
+            """
+        )
+    except Exception as exc:
+        logger.warning("proficiency_by_vertical: employee_role join failed: %s", exc)
+        _vertical_snapshot_computing = False
+        return _default_proficiency_by_vertical()
+
+    if not rows:
+        _vertical_snapshot_computing = False
+        return _default_proficiency_by_vertical()
+
+    uid_group: dict = {}
+    all_uid_list: list = []
+    for r in rows:
+        uid = r["user_id"]
+        if uid is None or uid in uid_group:
+            continue
+        uid_group[uid] = group_for(r.get("vertical_name"))
+        all_uid_list.append(uid)
+
+    # AI scores: warm classify_{uid} cache first, batch-compute the uncached —
+    # identical path to _compute_ai_proficiency_by_region.
+    uid_ai: dict = {}
+    uncached_uids: list = []
+    for uid in all_uid_list:
+        c = get_cache(f"classify_{uid}")
+        if c:
+            res = c.get("result", {})
+            axes = res.get("axes", ["AI", "Cloud", "Frontend", "Backend", "Data"])
+            this_month = res.get("this_month", [])
+            try:
+                ai_idx = axes.index("AI")
+                uid_ai[uid] = float(this_month[ai_idx]) if ai_idx < len(this_month) else 0.0
+            except (ValueError, IndexError):
+                uid_ai[uid] = 0.0
+        else:
+            uncached_uids.append(uid)
+
+    if uncached_uids:
+        try:
+            from services.skill_service import get_team_skill_scores
+            BATCH = 500
+            for i in range(0, len(uncached_uids), BATCH):
+                batch = uncached_uids[i: i + BATCH]
+                team_norm = get_team_skill_scores(batch)
+                for uid in batch:
+                    uid_ai[uid] = round(team_norm.get(uid, {}).get("AI", 0.0), 1)
+        except Exception as exc:
+            logger.warning("proficiency_by_vertical: skill scores failed for uncached batch: %s", exc)
+            for uid in uncached_uids:
+                uid_ai.setdefault(uid, 0.0)
+
+    threshold = settings.ai_proficiency_min_score
+    totals: dict = {}
+    proficient: dict = {}
+    for uid in all_uid_list:
+        g = uid_group[uid]
+        totals[g] = totals.get(g, 0) + 1
+        if uid_ai.get(uid, 0.0) >= threshold:
+            proficient[g] = proficient.get(g, 0) + 1
+
+    verticals = [
+        {
+            "name":    g,
+            "pct":     round(proficient.get(g, 0) / totals[g] * 100, 1) if totals[g] else 0.0,
+            "earners": proficient.get(g, 0),
+            "total":   totals[g],
+        }
+        for g in totals
+    ]
+    verticals.sort(key=lambda v: v["pct"], reverse=True)
+    if verticals:
+        verticals[0]["top"] = True
+
+    result = {"verticals": verticals}
+    set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
+    logger.info(
+        "proficiency_by_vertical: complete — %d groups, top %s %.1f%%",
+        len(verticals),
+        verticals[0]["name"] if verticals else "—",
+        verticals[0]["pct"] if verticals else 0.0,
+    )
+    _vertical_snapshot_computing = False
+    return result
+
+
+def _default_proficiency_by_vertical() -> dict:
+    """Empty placeholder shown while the background job computes."""
+    return {"verticals": []}
+
+
+_specialization_computing = False  # guard against concurrent recomputes
+
+
+def _compute_specialization_landscape() -> dict:
+    """
+    Distribution of the AI-proficient population across six role groups (A–F).
+
+    Classifies each employee (via core.roles.classify_role, keyed on
+    department_name + designation overrides + keyword fallback) and, among those
+    who are AI-proficient (AI axis >= ai_proficiency_min_score), computes each
+    group's SHARE of the total AI-proficient headcount (segments sum to 100%).
+
+    Returns {"tracks": [{track, pct, earners, col}]} sorted by pct desc
+    (earners = AI-proficient count in that group). Cached 25 h under
+    "specialization_landscape".
+    """
+    global _specialization_computing
+    from nova_db.gpt_cache import get_cache, set_cache
+    from core.queries import _DEDUP_CTE
+    from core.roles import classify_role, GROUP_ORDER, GROUP_LABELS, GROUP_COLORS
+
+    CACHE_KEY = "specialization_landscape"
+    cached = get_cache(CACHE_KEY)
+    if cached:
+        _specialization_computing = False
+        return cached["result"]
+
+    _specialization_computing = True
+    logger.info("specialization_landscape: computing company-wide role-group split")
+
+    try:
+        rows = _query(
+            _DEDUP_CTE + """
+            SELECT lp.user_id       AS user_id,
+                   er.department_name  AS department_name,
+                   er.designation_title AS designation_title,
+                   er.known_as_name   AS known_as_name,
+                   er.job_title       AS job_title,
+                   er.business_unit   AS business_unit
+            FROM employee_role er
+            JOIN latest_profiles lp
+              ON UPPER(TRIM(lp.employee_id)) = UPPER(TRIM(er.employee_id))
+            WHERE lp.rn = 1
+            """
+        )
+    except Exception as exc:
+        logger.warning("specialization_landscape: employee_role join failed: %s", exc)
+        _specialization_computing = False
+        return _default_specialization_landscape()
+
+    if not rows:
+        _specialization_computing = False
+        return _default_specialization_landscape()
+
+    uid_group: dict = {}
+    all_uid_list: list = []
+    for r in rows:
+        uid = r["user_id"]
+        if uid is None or uid in uid_group:
+            continue
+        uid_group[uid] = classify_role(
+            r.get("department_name"), r.get("designation_title"),
+            r.get("known_as_name"), r.get("job_title"), r.get("business_unit"),
+        )
+        all_uid_list.append(uid)
+
+    # AI scores: warm classify_{uid} cache first, batch-compute the uncached —
+    # identical path to _compute_proficiency_by_vertical.
+    uid_ai: dict = {}
+    uncached_uids: list = []
+    for uid in all_uid_list:
+        c = get_cache(f"classify_{uid}")
+        if c:
+            res = c.get("result", {})
+            axes = res.get("axes", ["AI", "Cloud", "Frontend", "Backend", "Data"])
+            this_month = res.get("this_month", [])
+            try:
+                ai_idx = axes.index("AI")
+                uid_ai[uid] = float(this_month[ai_idx]) if ai_idx < len(this_month) else 0.0
+            except (ValueError, IndexError):
+                uid_ai[uid] = 0.0
+        else:
+            uncached_uids.append(uid)
+
+    if uncached_uids:
+        try:
+            from services.skill_service import get_team_skill_scores
+            BATCH = 500
+            for i in range(0, len(uncached_uids), BATCH):
+                batch = uncached_uids[i: i + BATCH]
+                team_norm = get_team_skill_scores(batch)
+                for uid in batch:
+                    uid_ai[uid] = round(team_norm.get(uid, {}).get("AI", 0.0), 1)
+        except Exception as exc:
+            logger.warning("specialization_landscape: skill scores failed for uncached batch: %s", exc)
+            for uid in uncached_uids:
+                uid_ai.setdefault(uid, 0.0)
+
+    threshold = settings.ai_proficiency_min_score
+    proficient: dict = {}
+    for uid in all_uid_list:
+        if uid_ai.get(uid, 0.0) >= threshold:
+            g = uid_group[uid]
+            proficient[g] = proficient.get(g, 0) + 1
+
+    total = sum(proficient.values())
+    tracks = [
+        {
+            "track":   GROUP_LABELS[g],
+            "pct":     round(proficient[g] / total * 100, 1) if total else 0.0,
+            "earners": proficient[g],
+            "col":     GROUP_COLORS[g],
+        }
+        for g in GROUP_ORDER if proficient.get(g, 0) > 0
+    ]
+    tracks.sort(key=lambda t: t["pct"], reverse=True)
+
+    result = {"tracks": tracks}
+    set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
+    logger.info(
+        "specialization_landscape: complete — %d AI-proficient across %d groups",
+        total, len(tracks),
+    )
+    _specialization_computing = False
+    return result
+
+
+def _default_specialization_landscape() -> dict:
+    """Empty placeholder shown while the background job computes."""
+    return {"tracks": []}
+
+
+_team_quadrant_computing = False  # guard against concurrent recomputes
+
+
+def _compute_team_quadrant() -> dict:
+    """
+    4-quadrant "Team Landscape" scatter: each point is a manager's team, placed
+    by team-average AI proficiency (y, 0-100) and team-average ALL-TIME active
+    days (x). Teams of the same continent (of the manager) that land close
+    together are clustered into one bigger dot.
+
+    Returns {"points": [{id, x, y, continent, teams, people, managers:[{id,name}]}],
+             "maxX", "maxY"} — axes auto-scale to max+10. Cached 25 h under
+    "team_quadrant".
+    """
+    global _team_quadrant_computing
+    from nova_db.gpt_cache import get_cache, set_cache
+    from core.queries import _DEDUP_CTE
+    from core.geo import continent_for
+    from collections import defaultdict
+
+    CACHE_KEY = "team_quadrant"
+    cached = get_cache(CACHE_KEY)
+    if cached:
+        _team_quadrant_computing = False
+        return cached["result"]
+
+    _team_quadrant_computing = True
+    logger.info("team_quadrant: computing per-team AI-vs-activity landscape")
+
+    try:
+        emp_rows = _query(
+            _DEDUP_CTE + """
+            SELECT user_id, manager, country_code, display_name
+            FROM latest_profiles
+            WHERE rn=1 AND user_id IS NOT NULL
+            """
+        )
+    except Exception as exc:
+        logger.warning("team_quadrant: employee query failed: %s", exc)
+        _team_quadrant_computing = False
+        return _default_team_quadrant()
+
+    if not emp_rows:
+        _team_quadrant_computing = False
+        return _default_team_quadrant()
+
+    uid_cc: dict = {}
+    uid_name: dict = {}
+    mgr_reports: dict = defaultdict(list)
+    all_uids: set = set()
+    for r in emp_rows:
+        uid = r["user_id"]
+        if uid is None:
+            continue
+        uid_cc[uid] = r.get("country_code")
+        uid_name[uid] = (r.get("display_name") or "").strip().title() or f"User {uid}"
+        all_uids.add(uid)
+        if r.get("manager") is not None:
+            mgr_reports[r["manager"]].append(uid)
+
+    # All-time distinct active days per uid (3-source union, no date cap).
+    # NOTE: SQLite has no DATE type — use date(col), NOT CAST(col AS DATE) (which
+    # collapses to numeric affinity and garbles the count). Mirrors _build_people_list.
+    uid_days: dict = {}
+    try:
+        ad_rows = _query(
+            """
+            SELECT user_id, COUNT(DISTINCT activity_date) AS days FROM (
+                SELECT user_id, date(credit_date) AS activity_date
+                FROM fact_classmate_learning_credit WHERE is_deleted=0 AND duration>0
+                UNION
+                SELECT user_id, date(modified_on)
+                FROM fact_classmate_user_skill_status WHERE is_deleted=0 AND is_active=1
+                UNION
+                SELECT user_id, date(attended_date)
+                FROM fact_classmate_self_study WHERE status=2 AND is_deleted=0
+            ) s WHERE activity_date IS NOT NULL GROUP BY user_id
+            """
+        )
+        uid_days = {r["user_id"]: int(r["days"] or 0) for r in ad_rows}
+    except Exception as exc:
+        logger.warning("team_quadrant: active-days query failed: %s", exc)
+
+    # AI score per uid — warm classify_{uid} cache first, batch-compute the rest.
+    uid_ai: dict = {}
+    uncached_uids: list = []
+    for uid in all_uids:
+        c = get_cache(f"classify_{uid}")
+        if c:
+            res = c.get("result", {})
+            axes = res.get("axes", ["AI", "Cloud", "Frontend", "Backend", "Data"])
+            this_month = res.get("this_month", [])
+            try:
+                ai_idx = axes.index("AI")
+                uid_ai[uid] = float(this_month[ai_idx]) if ai_idx < len(this_month) else 0.0
+            except (ValueError, IndexError):
+                uid_ai[uid] = 0.0
+        else:
+            uncached_uids.append(uid)
+
+    if uncached_uids:
+        try:
+            from services.skill_service import get_team_skill_scores
+            BATCH = 500
+            for i in range(0, len(uncached_uids), BATCH):
+                batch = uncached_uids[i: i + BATCH]
+                team_norm = get_team_skill_scores(batch)
+                for uid in batch:
+                    uid_ai[uid] = round(team_norm.get(uid, {}).get("AI", 0.0), 1)
+        except Exception as exc:
+            logger.warning("team_quadrant: skill scores failed for uncached batch: %s", exc)
+            for uid in uncached_uids:
+                uid_ai.setdefault(uid, 0.0)
+
+    # Per-team aggregation (drop teams whose manager has no mapped continent).
+    teams = []
+    for mgr, reps in mgr_reports.items():
+        if not reps:
+            continue
+        cont = continent_for(uid_cc.get(mgr))
+        if cont is None:
+            continue
+        avg_ai = sum(uid_ai.get(u, 0.0) for u in reps) / len(reps)
+        avg_days = sum(uid_days.get(u, 0) for u in reps) / len(reps)
+        teams.append({
+            "mgr_id":   mgr,
+            "name":     uid_name.get(mgr, f"User {mgr}"),
+            "size":     len(reps),
+            "ai":       avg_ai,
+            "days":     avg_days,
+            "cont":     cont,
+        })
+
+    if not teams:
+        _team_quadrant_computing = False
+        return _default_team_quadrant()
+
+    max_ai = max(t["ai"] for t in teams)
+    max_days = max(t["days"] for t in teams)
+    axis_y = min(100, int(max_ai) + 1) + 10
+    axis_x = int(max_days) + 1 + 10
+
+    # One point per team (no clustering) so each dot is a single manager's team.
+    points = [
+        {
+            "id":         str(t["mgr_id"]),
+            "manager_id": t["mgr_id"],
+            "name":       t["name"],
+            "x":          round(t["days"], 2),
+            "y":          round(t["ai"], 1),
+            "continent":  t["cont"],
+            "people":     t["size"],
+        }
+        for t in teams
+    ]
+
+    result = {"points": points, "maxX": axis_x, "maxY": axis_y}
+    set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
+    logger.info(
+        "team_quadrant: complete — %d teams (maxX=%d maxY=%d)",
+        len(points), axis_x, axis_y,
+    )
+    _team_quadrant_computing = False
+    return result
+
+
+def _default_team_quadrant() -> dict:
+    """Empty placeholder shown while the background job computes."""
+    return {"points": [], "maxX": 10, "maxY": 100}
+
+
 # ── Legacy direct-report helper ───────────────────────────────────────────────
 
 def _avg_credits_this_quarter(uids: list) -> float:
@@ -1429,12 +1863,33 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
             _default_region_snapshot(),
         )
 
+        # Proficiency by vertical (bar chart) — % AI-proficient per industry group.
+        proficiency_by_vertical = _swr(
+            "proficiency_by_vertical",
+            _compute_proficiency_by_vertical,
+            _default_proficiency_by_vertical(),
+        )
+
+        # Specialization landscape (stacked bar) — share of AI-proficient people per role group.
+        specialization_landscape = _swr(
+            "specialization_landscape",
+            _compute_specialization_landscape,
+            _default_specialization_landscape(),
+        )
+
+        # Team landscape (4-quadrant scatter) — each dot a team by avg AI vs avg active days.
+        team_quadrant = _swr(
+            "team_quadrant",
+            _compute_team_quadrant,
+            _default_team_quadrant(),
+        )
+
         # Team Leaderboard = per-manager team skill average (name + % only),
         # each team being one manager's direct reports scored on the mean of all
         # 5 skill verticals. Sorted best-first; empty list until the snapshot is warm.
         mgr_snap = _swr("team_leaderboard_by_manager", _compute_manager_team_snapshot, [])
         team_leaderboard = sorted(
-            [{"name": m["name"], "prof": m["avg_skill_pct"]} for m in mgr_snap],
+            [{"name": m["name"], "prof": m["avg_skill_pct"], "manager_id": m["manager_id"]} for m in mgr_snap],
             key=lambda x: x["prof"], reverse=True,
         )
 
@@ -1459,6 +1914,9 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
         },
         "monthly_trend": monthly_trend,
         "proficiency_by_region": proficiency_by_region,
+        "proficiency_by_vertical": proficiency_by_vertical,
+        "specialization_landscape": specialization_landscape,
+        "team_quadrant": team_quadrant,
         "team_leaderboard": team_leaderboard,
         "at_risk":        at_risk,
     }

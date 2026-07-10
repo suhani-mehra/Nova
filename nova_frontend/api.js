@@ -253,6 +253,10 @@ function mapOverview(data) {
       active:      data.monthly_trend.map(m => m.active_pct ?? 0),
     },
     proficiencyByRegion: mapProficiencyByRegion(data.proficiency_by_region),
+    // % AI-proficient per industry group (real data from employee_role join).
+    proficiencyByVertical: (data.proficiency_by_vertical && data.proficiency_by_vertical.verticals) || null,
+    // Share of AI-proficient people across role groups A–F (stacked bar, sums to 100%).
+    specialization: (data.specialization_landscape && data.specialization_landscape.tracks) || null,
     // Active-learners-this-week hero card (the only surviving KPI).
     activeLearners: {
       count:    activeWeek,
@@ -263,6 +267,29 @@ function mapOverview(data) {
     teamLeaderboard: (data.team_leaderboard || []).map(t => ({
       name: t.name,
       prof: Math.round(t.prof),
+      manager_id: t.manager_id,
+    })),
+    // Team Landscape 4-quadrant scatter (each dot a team, clustered by continent).
+    teamQuadrant: mapTeamQuadrant(data.team_quadrant),
+  };
+}
+
+// Shapes the backend team_quadrant payload for the QuadrantChart, attaching a
+// continent color to each clustered point. Returns null when there are no points.
+function mapTeamQuadrant(tq) {
+  if (!tq || !tq.points || !tq.points.length) return null;
+  return {
+    maxX: tq.maxX,
+    maxY: tq.maxY,
+    points: tq.points.map(p => ({
+      id:         p.id,
+      manager_id: p.manager_id,
+      name:       p.name,
+      x:          p.x,
+      y:          p.y,
+      continent:  p.continent,
+      color:      REGION_COLORS[p.continent] || '#9aa2b1',
+      people:     p.people,
     })),
   };
 }

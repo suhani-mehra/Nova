@@ -51,7 +51,19 @@
 .nova-signin__logo {
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 14px;
+}
+
+.nova-signin__logo-oi {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nova-signin__oi-img {
+  height: 64px;
+  width: auto;
+  display: block;
 }
 
 .nova-signin__logo-mark {

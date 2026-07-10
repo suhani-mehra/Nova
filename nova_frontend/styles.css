@@ -128,8 +128,13 @@ body.glow-vivid{
   backdrop-filter:saturate(160%) blur(14px);
   border-bottom:1px solid var(--line-soft);
 }
-.brand{display:flex;align-items:center;gap:11px;justify-self:start}
+.brand{display:flex;align-items:center;gap:9px;justify-self:start}
 .brand .mark{width:38px;height:38px;display:block}
+.brand .oi-mark{height:45px;width:auto}
+.oi-mark.oi-light{display:block}
+.oi-mark.oi-dark{display:none}
+:root[data-theme="dark"] .oi-mark.oi-light{display:none}
+:root[data-theme="dark"] .oi-mark.oi-dark{display:block}
 .brand .word{font-weight:800;font-size:22px;letter-spacing:-.02em}
 .brand .word span{
   background:var(--grad-pill);-webkit-background-clip:text;background-clip:text;color:transparent;
@@ -187,7 +192,10 @@ body.glow-vivid{
 .role-chip.mgr{background:rgba(166,52,255,.13);color:var(--purple)}
 
 /* ---------------- layout ---------------- */
-.page{max-width:1520px;margin:0 auto;padding:34px 100px 60px}
+.page{max-width:1520px;margin:0 auto;padding:34px 100px 60px;animation:pageIn .34s ease both}
+@keyframes pageIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.chart-swap{animation:fadeSlide .28s ease both}
+@keyframes fadeSlide{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .page-head{margin-bottom:24px}
 .greeting{font-size:30px;font-weight:800;letter-spacing:-.02em;margin:0}
 .page-head .sub{color:var(--muted);font-size:15.5px;margin-top:6px;font-weight:500}
@@ -394,9 +402,10 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 .chart-legend .sw{width:16px;height:4px;border-radius:3px}
 .chart-legend .sw.dash{background:none;border-top:2.5px dashed var(--muted-2);height:0}
 
-.chart-tip{position:absolute;background:var(--tooltip-bg);color:var(--on-accent);border-radius:10px;padding:9px 12px;font-size:12px;font-weight:600;pointer-events:none;transform:translate(-50%,-115%);white-space:nowrap;box-shadow:0 8px 22px rgba(0,0,0,.25);z-index:5}
+.chart-tip{position:absolute;background:var(--tooltip-bg);color:var(--on-accent);border-radius:10px;padding:9px 12px;font-size:12px;font-weight:600;pointer-events:none;transform:translate(-50%,-115%);max-width:230px;white-space:normal;box-shadow:0 8px 22px rgba(0,0,0,.25);z-index:5;animation:tipPop .12s ease}
 .chart-tip .t1{color:var(--tooltip-ink);font-weight:600;font-size:11px;margin-bottom:3px}
-.chart-tip .row{display:flex;align-items:center;gap:7px;line-height:1.5}
+.chart-tip .row{display:flex;align-items:center;gap:7px;line-height:1.5;white-space:nowrap}
+@keyframes tipPop{from{opacity:0}to{opacity:1}}
 .chart-tip .dot{width:8px;height:8px;border-radius:50%}
 
 /* tier distribution */
@@ -440,8 +449,8 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 .trend-cell.down{color:var(--risk)}
 .trend-cell.flat{color:var(--muted)}
 
-.seg{display:inline-flex;background:var(--surface-2);border-radius:12px;padding:4px;gap:3px}
-.seg button{border:0;background:transparent;font-weight:700;font-size:13px;color:var(--muted);padding:8px 16px;border-radius:9px;transition:.14s}
+.seg{display:inline-flex;flex:0 0 auto;background:var(--surface-2);border-radius:12px;padding:4px;gap:3px}
+.seg button{border:0;background:transparent;font-weight:700;font-size:13px;color:var(--muted);padding:8px 16px;border-radius:9px;transition:.14s;white-space:nowrap}
 .seg button.on{background:var(--card);color:var(--purple);box-shadow:0 2px 8px rgba(80,60,120,.1)}
 .seg button:hover:not(.on){color:var(--ink-soft)}
 
@@ -631,6 +640,7 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 /* team leaderboard rows */
 .leader-row{display:flex;align-items:center;gap:12px;padding:9px 8px;border-radius:11px;transition:background .14s}
 .leader-row:hover{background:var(--surface-hover)}
+.leader-row.highlight{background:var(--surface-hover);box-shadow:inset 3px 0 0 var(--purple)}
 .lb-sort-btn:hover{border-color:color-mix(in srgb,var(--purple) 40%,var(--line));color:var(--purple)}
 .leader-scroll{padding-right:4px}
 

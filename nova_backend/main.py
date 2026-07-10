@@ -104,6 +104,21 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Could not schedule AI proficiency-by-region job: %s", exc)
         try:
+            from routers.manager import _compute_proficiency_by_vertical
+            loop.run_in_executor(None, _compute_proficiency_by_vertical)
+        except Exception as exc:
+            logger.warning("Could not schedule proficiency-by-vertical job: %s", exc)
+        try:
+            from routers.manager import _compute_specialization_landscape
+            loop.run_in_executor(None, _compute_specialization_landscape)
+        except Exception as exc:
+            logger.warning("Could not schedule specialization-landscape job: %s", exc)
+        try:
+            from routers.manager import _compute_team_quadrant
+            loop.run_in_executor(None, _compute_team_quadrant)
+        except Exception as exc:
+            logger.warning("Could not schedule team-quadrant job: %s", exc)
+        try:
             # Pre-warm the expensive company-wide overview stats so the manager
             # overview page never blocks on a full company scan after a restart.
             from routers.manager import (
@@ -186,6 +201,9 @@ async def lifespan(app: FastAPI):
                     _compute_quarterly_ai_proficiency,
                     _compute_manager_team_snapshot,
                     _compute_ai_proficiency_by_region,
+                    _compute_proficiency_by_vertical,
+                    _compute_specialization_landscape,
+                    _compute_team_quadrant,
                 )
                 _compute_company_overview_stats()
                 _compute_company_retention()
@@ -193,6 +211,9 @@ async def lifespan(app: FastAPI):
                 _compute_quarterly_ai_proficiency()
                 _compute_manager_team_snapshot()
                 _compute_ai_proficiency_by_region()
+                _compute_proficiency_by_vertical()
+                _compute_specialization_landscape()
+                _compute_team_quadrant()
             except Exception as exc:
                 logger.warning("Nightly company stats refresh failed: %s", exc)
 

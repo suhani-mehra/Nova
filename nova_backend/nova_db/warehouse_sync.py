@@ -39,6 +39,7 @@ API_TABLES = [
     "fact_classmate_user_skill_status",
     "fact_classmate_self_study",
     "fact_classmate_certification",
+    "employee_role",
 ]
 
 # Indexes on the join/filter columns the app's queries actually use.
@@ -58,6 +59,7 @@ _INDEXES = [
     ("dim_classmate_second_level_category", "id"),
     ("mv_employee_year_quarter_credits", "user_id"),
     ("vw_classmate_certification", "user_id"),
+    ("employee_role", "employee_id"),
 ]
 
 def warehouse_path() -> Path:

@@ -17,23 +17,31 @@ function StreakPill({days}){
 /* TODO: replace with a real API once a business-vertical taxonomy exists. */
 function VerticalBars({data}){
   const [hover,setHover]=useStateM(null);
-  const H=280, plotH=H-58;
+  const plotH=230, labelH=40;   // fixed plot + label areas → bars share a baseline, titles align
   return h('div',{style:{position:'relative',width:'100%'}},
-    h('div',{style:{display:'flex',alignItems:'flex-end',gap:10,height:H}},
+    // baseline the bars rest on
+    h('div',{style:{position:'absolute',left:0,right:0,top:plotH,height:2,background:'var(--chart-grid)',borderRadius:2}}),
+    h('div',{style:{display:'flex',alignItems:'flex-start',gap:16}},
       data.map((v,i)=>{
         const active=hover===i;
         return h('div',{key:i,onMouseEnter:()=>setHover(i),onMouseLeave:()=>setHover(null),
-          style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'flex-end',height:'100%',cursor:'pointer'}},
-          h('div',{style:{fontSize:14,fontWeight:800,color:v.top?'#FF4398':'var(--ink)',marginBottom:6}}, v.pct+'%'),
-          h('div',{style:{width:'100%',maxWidth:46,height:(v.pct/100)*plotH,borderRadius:'7px 7px 0 0',
-            background:v.top?'linear-gradient(180deg,#FF4398,#C21178)':'linear-gradient(180deg,#B266FF,#7d1fd0)',
-            filter:active?'brightness(1.08)':'none',transition:'filter .15s'}}),
-          h('div',{style:{fontSize:12,fontWeight:700,color:'var(--ink-soft)',marginTop:8,textAlign:'center',lineHeight:1.15}}, v.name),
-          h('div',{style:{fontSize:10.5,fontWeight:600,color:'var(--muted)',marginTop:2}}, _fmtN(v.earners)));
+          style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',alignItems:'center',cursor:'pointer'}},
+          // plot area: fixed height, bar bottom-anchored so every bar rests on the same baseline
+          h('div',{style:{height:plotH,width:'100%',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'flex-end'}},
+            h('div',{style:{fontSize:14,fontWeight:800,color:v.top?'#FF4398':'var(--ink)',marginBottom:6}}, v.pct+'%'),
+            h('div',{style:{width:'100%',maxWidth:46,height:(v.pct/100)*(plotH-28),borderRadius:'7px 7px 0 0',
+              background:v.top?'linear-gradient(180deg,#FF4398,#C21178)':'linear-gradient(180deg,#B266FF,#7d1fd0)',
+              filter:active?'brightness(1.08)':'none',transition:'filter .15s'}})),
+          // label area: fixed height, top-aligned so all titles start on the same line
+          h('div',{style:{height:labelH,marginTop:12,display:'flex',flexDirection:'column',alignItems:'center'}},
+            h('div',{style:{fontSize:12,fontWeight:700,color:'var(--ink-soft)',textAlign:'center',lineHeight:1.2}}, v.name)));
       })),
-    hover!==null && h('div',{className:'chart-tip',style:{left:((hover+0.5)/data.length*100)+'%',top:0}},
+    hover!==null && h('div',{className:'chart-tip',style:_tipStyle((hover+0.5)/data.length, 0)},
       h('div',{className:'t1'}, data[hover].name+' · '+data[hover].pct+'% proficient'),
-      h('div',{style:{fontSize:11,color:'#b7b9cc',fontWeight:600}}, _fmtN(data[hover].earners)+' earners'))
+      h('div',{style:{fontSize:11,color:'#b7b9cc',fontWeight:600}},
+        (data[hover].earners!=null && data[hover].total!=null)
+          ? _fmtN(data[hover].earners)+' of '+_fmtN(data[hover].total)+' proficient'
+          : _fmtN(data[hover].earners)+' earners'))
   );
 }
 
@@ -54,8 +62,7 @@ function SpecializationBar({data}){
           opacity:(hover===null||hover===i)?1:.5,transition:'opacity .15s'}},
         h('span',{style:{width:12,height:12,borderRadius:4,background:t.col,flex:'0 0 auto'}}),
         h('span',{style:{fontWeight:700,color:'var(--ink)',flex:1,minWidth:0}}, t.track),
-        h('span',{style:{fontWeight:800,color:'var(--ink)'}}, t.pct+'%'),
-        h('span',{style:{fontWeight:600,color:'var(--muted)',width:96,textAlign:'right'}}, _fmtN(t.earners)+' earners'))))
+        h('span',{style:{fontWeight:800,color:'var(--ink)'}}, t.pct+'%'))))
   );
 }
 
@@ -105,9 +112,24 @@ function _leaderboardFuzzy(rows, q){
   return [...exact.map(x=>x[1]), ...tok.map(x=>x[1]), ...fz];
 }
 
-function TeamLeaderboard({rows}){
+function TeamLeaderboard({rows, highlightIds, onHoverRow, scrollToId}){
   const [asc,setAsc]=useStateM(false);   // false = High → Low (default)
   const [q,setQ]=useStateM('');
+  const hl = new Set((highlightIds||[]).map(String));
+
+  // When a team is selected on the quadrant chart, reveal + scroll its row.
+  React.useEffect(()=>{
+    if(scrollToId==null) return;
+    // If an active search hides the target row, clear the search so it renders.
+    if(q.trim() && !_leaderboardFuzzy(rows||[], q).some(t=>String(t.manager_id)===String(scrollToId))){
+      setQ('');
+    }
+    const scroll=()=>{ const el=document.getElementById('lb-row-'+scrollToId);
+      if(el){ el.scrollIntoView({behavior:'smooth',block:'center'}); return true; } return false; };
+    if(scroll()) return;
+    const t=setTimeout(scroll,90);
+    return ()=>clearTimeout(t);
+  },[scrollToId]);
 
   if(!rows || !rows.length){
     return h('div',{style:{padding:'24px 6px',color:'var(--muted)',fontSize:13,fontWeight:600}},'No team data yet.');
@@ -146,7 +168,10 @@ function TeamLeaderboard({rows}){
     h('div',{className:'leader-scroll',style:{maxHeight:360,overflowY:'auto',scrollbarWidth:'thin'}},
       list.length===0
         ? h('div',{style:{padding:'20px 6px',color:'var(--muted)',fontSize:13,fontWeight:600}},'No managers match.')
-        : list.map(t=>h('div',{key:t.rank,className:'leader-row'},
+        : list.map(t=>h('div',{key:t.rank, id:'lb-row-'+t.manager_id,
+            className:'leader-row'+(hl.has(String(t.manager_id))?' highlight':''),
+            onMouseEnter:()=>onHoverRow&&onHoverRow(t.manager_id),
+            onMouseLeave:()=>onHoverRow&&onHoverRow(null)},
             h('div',{style:{width:34,fontSize:13,fontWeight:800,color:'var(--muted)'}}, '#'+t.rank),
             h('div',{style:{flex:1,minWidth:0}},
               h('div',{style:{fontWeight:800,fontSize:14,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}, t.name),
@@ -160,7 +185,9 @@ function MgrOverview(){
   const M=NOVA.manager;
   const O=M && M.overview;
   const S=(M && M.static) || {};
-  const [chartTab,setChartTab]=useStateM('trend');   // 'trend' (line) | 'region' (bars)
+  const [chartTab,setChartTab]=useStateM('trend');   // 'trend' (line) | 'region' (bars) | 'teams' (quadrant)
+  const [hlManagers,setHlManagers]=useStateM(null);  // transient hover highlight (quadrant ↔ leaderboard)
+  const [selManager,setSelManager]=useStateM(null);  // clicked team — persists + scrolls leaderboard
 
   if(!O){
     return h('div',{className:'page'},
@@ -169,7 +196,10 @@ function MgrOverview(){
   }
 
   const region=O.proficiencyByRegion;
+  const quadrant=O.teamQuadrant;
   const AL=O.activeLearners;
+  const REGION_LABELS={asia:'Asia', na:'North America', eu:'Europe'};
+  const REGION_COLS={asia:'#FF4398', na:'#2ACCFF', eu:'#A634FF'};
 
   const trendView = [
     h(LineChart,{key:'lc', months:O.months, proficiency:O.series.proficiency, active:O.series.active, target:O.target, total:O.total}),
@@ -189,6 +219,19 @@ function MgrOverview(){
       h('div',{className:'it'}, h('span',{style:{width:16,height:2,background:'#7a7d96',display:'inline-block'}}),'Company-wide actual')),
   ];
 
+  // Hover highlight takes precedence; otherwise the clicked team stays highlighted.
+  const activeHl = hlManagers || (selManager!=null ? [selManager] : null);
+
+  const quadrantView = quadrant ? [
+    h(QuadrantChart,{key:'qc', data:quadrant, highlightIds:activeHl, onHover:setHlManagers, onSelect:setSelManager}),
+    h('div',{key:'qg',className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
+      ['asia','na','eu'].map(k=>h('div',{className:'it',key:k},
+        h('span',{style:{width:13,height:13,borderRadius:'50%',background:REGION_COLS[k],display:'inline-block'}}),
+        REGION_LABELS[k]))),
+  ] : [
+    h('div',{key:'qe',style:{padding:'40px 6px',color:'var(--muted)',fontSize:13,fontWeight:600,textAlign:'center'}},'No team data yet.'),
+  ];
+
   return h('div',{className:'page'},
     h('div',{className:'page-head'},
       h('h1',{className:'greeting'},'Learning Overview'),
@@ -197,22 +240,26 @@ function MgrOverview(){
     h('div',{className:'mgr-cols'},
       // ── left column ──
       h('div',{className:'mgr-col-main'},
-        h('div',{className:'card'},
+        h('div',{className:'card', style:{minHeight:560,display:'flex',flexDirection:'column'}},
           h('div',{className:'card-head-row', style:{marginBottom:16}},
             h('div',null,
-              h('div',{className:'card-title'}, chartTab==='trend'?'AI Proficiency Trend':'AI Proficiency by Region'),
+              h('div',{className:'card-title'}, chartTab==='trend'?'AI Proficiency Trend':chartTab==='region'?'AI Proficiency by Region':'Team Landscape'),
               h('div',{className:'card-sub'}, chartTab==='trend'
                 ? '% of all employees with AI proficiency ≥ 30%, measured at each quarter end.'
-                : "Each region's own % proficient at each level, vs. the company-wide actual and goal.")),
+                : chartTab==='region'
+                ? "Each region's own % proficient at each level, vs. the company-wide actual and goal."
+                : "Each dot is a team — average AI proficiency vs. activity; size = teams clustered, color = manager's region.")),
             h('div',{className:'seg'},
               h('button',{className:chartTab==='trend'?'on':'', onClick:()=>setChartTab('trend')},'Trend'),
-              h('button',{className:chartTab==='region'?'on':'', onClick:()=>setChartTab('region')},'By region'))),
-          chartTab==='trend' ? trendView : regionView
+              h('button',{className:chartTab==='region'?'on':'', onClick:()=>setChartTab('region')},'By region'),
+              h('button',{className:chartTab==='teams'?'on':'', onClick:()=>setChartTab('teams')},'Teams'))),
+          h('div',{key:chartTab, className:'chart-swap', style:{flex:1,display:'flex',flexDirection:'column',justifyContent:'center'}},
+            chartTab==='trend' ? trendView : chartTab==='region' ? regionView : quadrantView)
         ),
         h('div',{className:'card', style:{flex:1,display:'flex',flexDirection:'column'}},
           h('div',{className:'card-title'},'Proficiency by Vertical'),
           h('div',{className:'card-sub', style:{marginBottom:14}},'% AI-proficient within each business vertical, ranked.'),
-          h('div',{style:{flex:1,display:'flex',alignItems:'flex-end'}}, h(VerticalBars,{data:S.verticals||[]})))
+          h('div',{style:{flex:1,display:'flex',alignItems:'flex-end'}}, h(VerticalBars,{data:(O && O.proficiencyByVertical) || S.verticals || []})))
       ),
 
       // ── right rail ──
@@ -223,11 +270,12 @@ function MgrOverview(){
           h('div',{className:'hero-sub'}, `${AL.pct.toFixed(1)}% of ${AL.total.toLocaleString()} employees`)),
         h('div',{className:'card'},
           h('div',{className:'card-title'},'Specialization Landscape'),
-          h('div',{className:'card-sub', style:{marginBottom:16}},'Workforce across horizontal specialization tracks.'),
-          h(SpecializationBar,{data:S.specialization||[]})),
+          h('div',{className:'card-sub', style:{marginBottom:16}},'Share of AI-proficient employees by role group.'),
+          h(SpecializationBar,{data:(O && O.specialization) || S.specialization || []})),
         h('div',{className:'card', style:{flex:1}},
           h('div',{className:'card-title', style:{marginBottom:16}},'Team Leaderboard'),
-          h(TeamLeaderboard,{rows:O.teamLeaderboard}))
+          h(TeamLeaderboard,{rows:O.teamLeaderboard, highlightIds:activeHl,
+            onHoverRow:(id)=>setHlManagers(id?[id]:null), scrollToId:selManager}))
       )
     )
   );
@@ -274,9 +322,10 @@ function MgrYourTeam(){
   const displayList=isSearching?(searchResults||[]):filtered;
 
   // Scatter always shows the FULL team (ignores filter/search), one dot per report.
+  // x = all-time active days, y = AI proficiency (consistent with the Overview quadrant).
   const scatterPoints=people.map(p=>{
     const prof=(p.prof!=null)?p.prof:Math.round(p.ai_proficiency||0);
-    return {id:p.user_id, name:p.name, x:prof, y:p.activeDays||0, atRisk:(p.status==='risk')||prof<20};
+    return {id:p.user_id, name:p.name, x:p.activeDays||0, y:prof, atRisk:(p.status==='risk')||prof<20};
   });
 
   // Two-way selection between scatter and table.
@@ -344,7 +393,7 @@ function MgrYourTeam(){
           h('div',{className:'hero-num hero-num-sm'}, _fmtN(active.count))),
         h('div',{className:'card mgr-team-scatter', style:{flex:1,display:'flex',flexDirection:'column'}},
           h('div',{className:'card-title'},'Team Landscape'),
-          h('div',{className:'card-sub', style:{marginBottom:8}},'Each dot is a teammate — AI proficiency vs. total active days.'),
+          h('div',{className:'card-sub', style:{marginBottom:8}},'Each dot is a teammate — active days vs. AI proficiency.'),
           h('div',{style:{flex:1,display:'flex',alignItems:'center'}},
             h(ScatterChart,{points:scatterPoints, selectedId, onSelect:onSelectPerson, compact:true}))))
     ),

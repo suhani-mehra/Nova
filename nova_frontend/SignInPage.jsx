@@ -29,12 +29,8 @@ function SignInPage({ onSignIn, onDevSignIn, contactHref = "#" }) {
         {/* Left: brand + value proposition */}
         <section className="nova-signin__brand">
           <header className="nova-signin__logo">
-            <span className="nova-signin__logo-mark" aria-hidden="true">
-              <_SparkleIcon />
-            </span>
-            <span className="nova-signin__logo-text">
-              <span className="nova-signin__logo-name">Nova</span>
-              <span className="nova-signin__logo-sub">BY ORION</span>
+            <span className="nova-signin__logo-oi" aria-hidden="true">
+              <_OILogo />
             </span>
           </header>
 
@@ -111,6 +107,10 @@ function SignInPage({ onSignIn, onDevSignIn, contactHref = "#" }) {
 }
 
 /* ---- Private icons (prefixed _ so they don't pollute the global namespace) ---- */
+
+function _OILogo() {
+  return <img className="nova-signin__oi-img" src="/logo-dark.svg" alt="OI Polaris" />;
+}
 
 function _SparkleIcon() {
   return (
