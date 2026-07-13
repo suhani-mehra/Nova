@@ -8,7 +8,6 @@ Manager endpoints:
 
 import asyncio
 import logging
-import math
 import zlib as _zlib
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -144,6 +143,8 @@ def _prewarm_streak_cache(chunk_size: int = 500):
 
     for i in range(0, len(cold), chunk_size):
         chunk = cold[i : i + chunk_size]
+        # Placeholder count for IN(...), not a value — each id is still bound
+        # through the parameterised '?' slots below, never concatenated.
         ph = ",".join("?" * len(chunk))
         try:
             activity_rows = _query(
@@ -259,47 +260,6 @@ def _prewarm_manager_people_cache(chunk_size: int = 20):
     logger.info("manager people pre-warm complete")
 
 
-# ── Placeholder data ──────────────────────────────────────────────────────────
-
-_PLACEHOLDER_OVERVIEW = {
-    "kpis": {
-        "total_team":               8,
-        "active_this_week":         5,
-        "ai_proficient_count":      3,
-        "ai_proficient_pct":        37.5,
-        "avg_credits_this_quarter": 24.2,
-        "retention_rate":           0.0,
-        "retention_rate_trend_pct": 0.0,
-        "retention_rate_trend_dir": "flat",
-        "ai_proficiency_trend_pts": 0.0,
-        "at_risk_count_company":    0,
-        "at_risk_count_trend_pct":  0.0,
-        "at_risk_count_trend_dir":  "flat",
-    },
-    "monthly_trend": [
-        {"month": "Q1 '25", "credits": 0.0, "active_pct": 0.0},
-        {"month": "Q2 '25", "credits": 0.0, "active_pct": 0.0},
-    ],
-    "at_risk": [],
-}
-
-_PLACEHOLDER_TEAMS = {
-    "departments": [
-        {
-            "name":              "Engineering",
-            "headcount":         5,
-            "avg_credits":       28.4,
-            "ai_proficient_pct": 40.0,
-            "trend_pct":         0.0,
-            "top_course":        "Python for Data Science",
-            "tier_distribution": {
-                "platinum": 0, "diamond": 1, "gold": 2,
-                "silver": 1, "bronze": 1, "starter": 0,
-            },
-        }
-    ]
-}
-
 # ── Core helpers ──────────────────────────────────────────────────────────────
 
 async def _run(fn, *args):
@@ -382,6 +342,8 @@ def _get_team_active_this_week(uids: list) -> int:
         return 0
     monday = date.today() - timedelta(days=date.today().weekday())
     sunday = monday + timedelta(days=6)
+    # Placeholder count for IN(...), not a value — each id is still bound
+    # through the parameterised '?' slots below, never concatenated.
     ph = ",".join("?" * len(uids))
     rows = _query(
         f"""
@@ -418,6 +380,8 @@ def _get_team_courses_completed_this_week(uids: list) -> int:
         return 0
     monday = date.today() - timedelta(days=date.today().weekday())
     sunday = monday + timedelta(days=6)
+    # Placeholder count for IN(...), not a value — each id is still bound
+    # through the parameterised '?' slots below, never concatenated.
     ph = ",".join("?" * len(uids))
     rows = _query(
         f"""
@@ -1571,28 +1535,6 @@ def _default_team_quadrant() -> dict:
     return {"points": [], "maxX": 10, "maxY": 100}
 
 
-# ── Legacy direct-report helper ───────────────────────────────────────────────
-
-def _avg_credits_this_quarter(uids: list) -> float:
-    if not uids:
-        return 0.0
-    placeholders = ",".join("?" * len(uids))
-    rows = _query(
-        f"""
-        SELECT AVG(s.credits) AS avg_c
-        FROM (
-            SELECT user_id, SUM(learning_credits) AS credits
-            FROM   vw_classmate_trainings
-            WHERE  user_id IN ({placeholders})
-              AND  status = 4052
-              AND  completed_on >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-90 days')
-            GROUP BY user_id
-        ) s
-        """,
-        tuple(uids),
-    )
-    return round(float(rows[0]["avg_c"] or 0), 1) if rows else 0.0
-
 
 # ── Search helpers ────────────────────────────────────────────────────────────
 
@@ -1709,6 +1651,8 @@ def _search_company_wide(q: str) -> list:
 def _enrich_search_results(uids: list, rows: list) -> list:
     if not uids:
         return []
+    # Placeholder count for IN(...), not a value — each id is still bound
+    # through the parameterised '?' slots below, never concatenated.
     ph = ",".join("?" * len(uids))
     uid_to_row = {r["user_id"]: r for r in rows}
 
@@ -1977,6 +1921,8 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
 
     uids = [r["user_id"] for r in reports]
     uid_to_report = {r["user_id"]: r for r in reports}
+    # Placeholder count for IN(...), not a value — each id is still bound
+    # through the parameterised '?' slots below, never concatenated.
     placeholders = ",".join("?" * len(uids))
 
     credit_rows = _query(

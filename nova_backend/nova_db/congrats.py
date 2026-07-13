@@ -4,7 +4,6 @@ SQLite-backed congrats store — separate from Fabric.
 """
 
 import sqlite3
-import os
 from pathlib import Path
 
 _DB_PATH = Path(__file__).parent.parent / "nova_local.db"

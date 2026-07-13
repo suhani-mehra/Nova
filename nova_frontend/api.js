@@ -107,17 +107,13 @@ function mapDashboard(data) {
     currentTier:  data.tier.current,
     nextTier:     data.tier.next,
     tierProgress: data.tier.progress,
-    learningTime: data.streak.learning_time,
     streak:       data.streak.current,
-    streakWeek:   data.streak.week_map,
     skills: {
       axes:      data.skills.axes,
       thisMonth: data.skills.this_month,
       lastMonth: data.skills.last_month,
       delta:     data.skills.delta,
-      scoredBy:  data.skills.scored_by || 'keywords',
     },
-    tierScoredBy:   data.tier?.scored_by || 'keywords',
     congratsReceived: data.congrats_received ?? 0,
     badges: _mapBadges(data.badges),
     continueCourse: data.continue_course ? {
@@ -126,12 +122,6 @@ function mapDashboard(data) {
       status:   'In Progress',
       progress: data.continue_course.progress,
       tile:     ['#A634FF', '#5400DC'],
-    } : null,
-    recommended: data.recommended ? {
-      name:     data.recommended.course_name,
-      meta:     data.recommended.reason,
-      tile:     ['#2ACCFF', '#5400DC'],
-      scoredBy: data.recommended.scored_by || 'keywords',
     } : null,
   };
 }
@@ -147,14 +137,6 @@ function mapTeam(data) {
   const recSource = data.popular_source || 'team';
   return {
     recSource,
-    learningTime: data.highlights.top_learner
-      ? data.highlights.top_learner.credits + ' credits'
-      : '—',
-    highlights: {
-      congrats:  data.congrats_this_week ?? 0,
-      topCourse: data.top_course || '—',
-      timeDelta: data.highlights?.time_delta_pct ?? 0,
-    },
     accomplishments: data.accomplishments.map(a => ({
       user_id: a.user_id,
       name: a.employee_name,
@@ -307,7 +289,6 @@ function mapYourTeam(data) {
       total: teamSize,
       pct:   teamSize ? (activeCount / teamSize * 100) : 0,
     },
-    coursesThisWeek: data.courses_this_week || 0,
     radar:  data.radar || {axes:['AI','Cloud','Frontend','Backend','Data'], this_month:[0,0,0,0,0], last_month:[0,0,0,0,0]},
     badges: {
       total:          b.total || 0,
@@ -316,7 +297,6 @@ function mapYourTeam(data) {
       byTier:         b.by_tier || {platinum:0,diamond:0,gold:0,silver:0,bronze:0},
     },
     people,
-    riskCount: people.filter(p => p.status === 'risk').length,
     // Top 5 leaderboard teams with full 5-axis radar, for the radar-overlay picker.
     topTeams: (data.top_teams || []).map(t => ({
       manager_id: t.manager_id,

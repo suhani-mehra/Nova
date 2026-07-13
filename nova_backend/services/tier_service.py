@@ -71,15 +71,6 @@ def _tier_progress(percentile: float) -> int:
     return 0
 
 
-_TIER_THRESHOLDS = [
-    (500, "platinum", "platinum"),
-    (200, "diamond",  "platinum"),
-    (100, "gold",     "diamond"),
-    (50,  "silver",   "gold"),
-    (20,  "bronze",   "silver"),
-    (0,   "starter",  "bronze"),
-]
-
 # ── Single source of truth for tiers ─────────────────────────────────────────
 # Every tier is computed in ONE place (compute_and_cache_tiers) and stored in the
 # tier_{uid} cache. Both the employee dashboard (calculate_tier) and the manager
@@ -361,28 +352,3 @@ def award_monthly_badges(target_month: date, awarded_at: str | None = None) -> i
             awarded += 1
     logger.info("award_monthly_badges %s: awarded %d non-starter badges", month, awarded)
     return awarded
-
-
-def get_all_user_tiers() -> dict:
-    all_credits_rows = query(
-        """
-        SELECT user_id, SUM(learning_credits) AS credits
-        FROM   vw_classmate_trainings
-        WHERE  status = 4052
-        GROUP BY user_id
-        """,
-    )
-    if not all_credits_rows:
-        return {}
-
-    result = {}
-    for r in all_credits_rows:
-        uid = r["user_id"]
-        credits = float(r["credits"] or 0)
-        tier = "starter"
-        for threshold, t, _ in _TIER_THRESHOLDS:
-            if credits >= threshold:
-                tier = t
-                break
-        result[uid] = tier
-    return result

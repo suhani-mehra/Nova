@@ -88,9 +88,10 @@ def _validate_azure_token(token: str) -> dict:
             issuer=settings.azure_issuer,
         )
     except JWTError as e:
+        logger.warning("Azure AD token validation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Token validation failed: {str(e)}",
+            detail="Token validation failed",
         )
 
     return claims

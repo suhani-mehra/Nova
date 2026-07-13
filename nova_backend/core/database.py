@@ -89,7 +89,8 @@ def query(sql: str, params: Optional[tuple] = None) -> list[dict]:
             for row in cursor.fetchall()
         ]
     except Exception as exc:
-        logger.error("Query failed: %s\nSQL: %s\nParams: %s", exc, sql, params)
+        # SQL text only — params can carry employee IDs, so they're excluded from the log.
+        logger.error("Query failed: %s\nSQL: %s", exc, sql)
         raise
     finally:
         conn.close()
@@ -101,7 +102,7 @@ def query_df(sql: str, params: Optional[tuple] = None) -> pd.DataFrame:
     try:
         return pd.read_sql_query(sql, conn, params=_adapt_params(params))
     except Exception as exc:
-        logger.error("query_df failed: %s\nSQL: %s\nParams: %s", exc, sql, params)
+        logger.error("query_df failed: %s\nSQL: %s", exc, sql)
         raise
     finally:
         conn.close()

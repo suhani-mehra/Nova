@@ -112,21 +112,6 @@ function _OILogo() {
   return <img className="nova-signin__oi-img" src="/logo-white.svg" alt="OI Polaris" />;
 }
 
-function _SparkleIcon() {
-  return (
-    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M12 3.2l1.7 4.1 4.1 1.7-4.1 1.7L12 14.8l-1.7-4.1L6.2 9l4.1-1.7L12 3.2z"
-        fill="currentColor"
-      />
-      <path
-        d="M17.6 14.4l.85 2.05 2.05.85-2.05.85-.85 2.05-.85-2.05-2.05-.85 2.05-.85.85-2.05z"
-        fill="currentColor"
-      />
-    </svg>
-  );
-}
-
 function _MicrosoftLogo() {
   return (
     <svg width="26" height="26" viewBox="0 0 23 23" aria-hidden="true">

@@ -152,14 +152,6 @@ body.glow-vivid{
 
 .topbar .right{justify-self:end;display:flex;align-items:center;gap:14px}
 
-.kpi-pill{
-  display:flex;align-items:center;gap:12px;
-  background:var(--card);border:1px solid var(--line);border-radius:16px;padding:10px 16px;box-shadow:var(--shadow);
-}
-.kpi-pill .ic{width:34px;height:34px;border-radius:11px;display:grid;place-items:center;background:rgba(166,52,255,.1);color:var(--purple)}
-.kpi-pill .lab{font-size:11.5px;color:var(--muted);font-weight:600;line-height:1.2;white-space:nowrap}
-.kpi-pill .val{font-size:17px;font-weight:800;letter-spacing:-.01em}
-
 /* profile */
 .profile{position:relative}
 .profile-btn{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:7px 12px 7px 8px;box-shadow:var(--shadow);transition:.16s;color:var(--ink)}
@@ -201,11 +193,8 @@ body.glow-vivid{
 .page-head .sub{color:var(--muted);font-size:15.5px;margin-top:6px;font-weight:500}
 
 .grid{display:grid;gap:22px}
-.cols-3{grid-template-columns:repeat(3,1fr)}
-.cols-2{grid-template-columns:1fr 1fr}
 .emp-grid{display:flex;gap:22px;align-items:stretch}
 .emp-col-group{display:flex;gap:22px;align-items:stretch;flex:2.55 0 0;min-width:0}
-.span-2{grid-column:span 2}
 
 /* ---------------- card ---------------- */
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:26px 28px;position:relative;overflow:hidden}
@@ -248,8 +237,6 @@ body.glow-vivid{
 .tier-card .tier-main{flex:1 1 auto;min-width:0}
 .tier-card .badges{flex:0 0 auto;width:212px;border-left:1px solid var(--line);padding-left:26px;margin-left:30px;display:flex;flex-direction:column}
 .badges-title{font-size:17px;font-weight:800;letter-spacing:-.01em;margin:2px 0 16px}
-.badge-rows{display:flex;flex-direction:column;gap:6px}
-.badge-row{display:flex;gap:6px}
 /* Badges: one column per tier (best→worst), repeats stacked below, "+N" on overflow */
 .badge-cols{display:flex;flex-direction:row;gap:10px;flex-wrap:wrap;align-items:flex-start}
 .badge-col{display:flex;flex-direction:column;align-items:center;gap:2px}
@@ -263,23 +250,6 @@ body.glow-vivid{
 .plat-msg{font-size:16px;font-weight:800;color:var(--ink)}
 .plat-sub{font-size:13px;color:var(--ink-soft)}
 
-/* ---------------- streak ---------------- */
-.streak-card{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
-.flame{font-size:84px;line-height:1;filter:drop-shadow(0 10px 22px rgba(255,107,40,.4));margin:14px 0 6px}
-.streak-num{font-size:64px;font-weight:800;letter-spacing:-.03em;line-height:1}
-.streak-lab{color:#FF6A2C;font-weight:800;font-size:19px;margin-top:2px}
-.streak-week{display:flex;gap:9px;margin-top:22px}
-.streak-week .d{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;font-size:11px;font-weight:700;color:var(--muted-2);background:var(--surface-2)}
-.streak-week .d.on{background:var(--grad-pill);color:#fff;box-shadow:0 4px 12px rgba(166,52,255,.3)}
-
-/* compact streak (consolidated employee view) */
-.streak-compact{display:flex;align-items:center;gap:16px}
-.streak-compact .flame-sm{font-size:34px;line-height:1;filter:drop-shadow(0 6px 14px rgba(255,107,40,.35))}
-.streak-compact .streak-compact-main{flex:0 0 auto}
-.streak-compact .streak-num-sm{font-size:34px;font-weight:800;letter-spacing:-.02em;line-height:1}
-.streak-compact .streak-lab-sm{color:#FF6A2C;font-weight:800;font-size:13px;margin-top:3px}
-.streak-compact .streak-week{margin-top:0;margin-left:auto}
-.streak-compact .streak-week .d{width:26px;height:26px;border-radius:8px;font-size:10.5px}
 /* clickable accomplishments box */
 .acc-box{transition:border-color .18s, box-shadow .18s, transform .18s}
 .acc-box:hover{border-color:color-mix(in srgb, var(--purple) 45%, var(--line));box-shadow:0 10px 30px rgba(166,52,255,.14);transform:translateY(-2px)}
@@ -322,8 +292,6 @@ body.glow-vivid{
 .compare-opt{display:flex;align-items:center;gap:10px;width:100%;background:none;border:0;padding:7px 10px;border-radius:10px;font-size:13.5px;font-weight:600;color:var(--ink);cursor:pointer;text-align:left}
 .compare-opt:hover{background:rgba(166,52,255,.07);color:var(--purple)}
 .compare-empty{font-size:13px;color:var(--muted);padding:10px;text-align:center}
-.compare-clear{background:none;border:0;color:var(--muted-2);cursor:pointer;font-size:11px;padding:0 0 0 4px;line-height:1;vertical-align:middle}
-.compare-clear:hover{color:var(--fuchsia)}
 .btn-compare-clear{display:flex;align-items:center;gap:5px;background:none;border:1px solid var(--line);border-radius:20px;padding:5px 14px;font-size:12.5px;font-weight:700;color:var(--muted);cursor:pointer;transition:.15s}
 .btn-compare-clear:hover{border-color:var(--fuchsia);color:var(--fuchsia)}
 
@@ -342,7 +310,6 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 .reco .arrow{margin-left:auto;color:var(--muted-2)}
 
 /* ---------------- accomplishments list ---------------- */
-.acc-list{margin-top:18px;display:flex;flex-direction:column}
 .acc{display:flex;align-items:center;gap:14px;padding:15px 4px;border-top:1px solid var(--line-soft)}
 .acc:first-child{border-top:0}
 .acc .body{flex:1;min-width:0}
@@ -357,7 +324,6 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 .btn-congrats.sent{background:var(--ok-bg);color:var(--ok);border-color:transparent;cursor:default}
 
 /* ---------------- reco course cards ---------------- */
-.reco-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:18px}
 .reco-card{display:flex;align-items:center;gap:16px;border:1px solid var(--line);border-radius:18px;padding:17px 18px;transition:.22s border-color,.22s box-shadow,.22s transform}
 .reco-card:hover{border-color:color-mix(in srgb,var(--purple) 35%,var(--line));box-shadow:0 8px 22px rgba(166,52,255,.11);transform:translateY(-2px)}
 .reco-card .body{flex:1;min-width:0}
@@ -380,19 +346,6 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 .av.lg{width:34px;height:34px;font-size:12px}
 
 /* ================= MANAGER ================= */
-.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:22px}
-.kpi-card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px 24px}
-.kpi-card .top{display:flex;align-items:center;justify-content:space-between}
-.kpi-card .ic{width:42px;height:42px;border-radius:13px;display:grid;place-items:center}
-.kpi-card .trend{font-size:13px;font-weight:800;display:inline-flex;align-items:center;gap:3px}
-.kpi-card .trend.up{color:var(--ok)}
-.kpi-card .trend.down{color:var(--risk)}
-/* For metrics where an increase is bad (e.g. at-risk count), invert the colors. */
-.kpi-card .trend.up.invert{color:var(--risk)}
-.kpi-card .trend.down.invert{color:var(--ok)}
-.kpi-card .num{font-size:34px;font-weight:800;letter-spacing:-.025em;margin-top:14px;line-height:1}
-.kpi-card .lab{color:var(--muted);font-size:13.5px;font-weight:600;margin-top:6px}
-.kpi-card .lab b{color:var(--ink-soft);font-weight:700}
 
 /* line chart card */
 .goal-banner{display:flex;align-items:center;gap:10px;background:rgba(166,52,255,.06);border:1px solid rgba(166,52,255,.16);border-radius:13px;padding:9px 14px;font-size:13.5px;font-weight:600;color:var(--ink-soft)}
@@ -408,22 +361,6 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 @keyframes tipPop{from{opacity:0}to{opacity:1}}
 .chart-tip .dot{width:8px;height:8px;border-radius:50%}
 
-/* tier distribution */
-.dist{display:flex;flex-direction:column;gap:15px;margin-top:6px}
-.dist .row{display:flex;align-items:center;gap:14px}
-.dist .row .name{width:80px;font-size:14px;font-weight:700;display:flex;align-items:center;gap:9px}
-.dist .row .swh{width:14px;height:14px;border-radius:5px;flex:0 0 auto}
-.dist .row .track{flex:1;height:22px;border-radius:8px;background:var(--surface-2);overflow:hidden}
-.dist .row .track > i{display:block;height:100%;border-radius:8px;transition:width .6s cubic-bezier(.2,.7,.2,1)}
-.dist .row .cnt{width:108px;text-align:right;font-size:13.5px;font-weight:700;color:var(--ink-soft)}
-.dist .row .cnt span{color:var(--muted);font-weight:600}
-
-/* teams table */
-.team-row{display:grid;grid-template-columns:1.6fr 1fr 1.4fr auto;align-items:center;gap:18px;padding:17px 18px;border-radius:16px;border:1px solid transparent;transition:.14s}
-.team-row:hover{background:var(--surface-hover);border-color:var(--line)}
-.team-row .tname{font-weight:800;font-size:15.5px}
-.team-row .tmeta{font-size:12.5px;color:var(--muted);font-weight:600;margin-top:2px}
-.team-head{display:grid;grid-template-columns:1.6fr 1fr 1.4fr auto;gap:18px;padding:0 18px 10px;font-size:11.5px;font-weight:700;color:var(--muted-2);text-transform:uppercase;letter-spacing:.05em}
 .bar-wide{height:10px;border-radius:999px;background:var(--surface-3);overflow:hidden}
 .bar-wide > i{display:block;height:100%;border-radius:999px;transition:width .6s}
 .pct-strong{font-weight:800;font-size:15px}
@@ -444,28 +381,16 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 .ppl-row .who .nm{font-weight:700;font-size:14.5px}
 .ppl-row .who .rl{font-size:12px;color:var(--muted);font-weight:600}
 .tier-pill{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:700}
-.trend-cell{display:inline-flex;align-items:center;gap:5px;font-weight:800;font-size:13.5px}
-.trend-cell.up{color:var(--ok)}
-.trend-cell.down{color:var(--risk)}
-.trend-cell.flat{color:var(--muted)}
 
 .seg{display:inline-flex;flex:0 0 auto;background:var(--surface-2);border-radius:12px;padding:4px;gap:3px}
 .seg button{border:0;background:transparent;font-weight:700;font-size:13px;color:var(--muted);padding:8px 16px;border-radius:9px;transition:.14s;white-space:nowrap}
 .seg button.on{background:var(--card);color:var(--purple);box-shadow:0 2px 8px rgba(80,60,120,.1)}
 .seg button:hover:not(.on){color:var(--ink-soft)}
 
-.filter-note{font-size:13px;color:var(--muted);font-weight:600}
-.filter-note b{color:var(--ink-soft)}
-
 /* responsive */
 @media (max-width:1080px){
-  .cols-3{grid-template-columns:1fr}
-  .cols-2{grid-template-columns:1fr}
   .emp-grid{flex-direction:column}
   .emp-col-group{flex-direction:column;flex:none;width:100%}
-  .reco-grid{grid-template-columns:1fr}
-  .span-2{grid-column:auto}
-  .kpi-grid{grid-template-columns:repeat(2,1fr)}
 }
 @media (max-width:980px){
   .topbar{display:flex;flex-wrap:wrap;justify-content:space-between;gap:14px}
@@ -477,8 +402,6 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
   .brand{min-width:0}
   .highlights{grid-template-columns:1fr}
   .hl + .hl{border-left:0;border-top:1px solid var(--line)}
-  .kpi-grid{grid-template-columns:1fr}
-  .team-row,.team-head{grid-template-columns:1fr auto}
   .ppl-head,.ppl-row{grid-template-columns:1.6fr auto}
 }
 
@@ -620,7 +543,6 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 .mgr-team-radar{flex:1.15;min-width:0}
 .mgr-team-badges{flex:1;min-width:0}
 .mgr-team-rail{flex:1.15;min-width:0;display:flex;flex-direction:column;gap:22px}
-.hero-compact,.hero-fill{flex:1;display:flex;flex-direction:column;justify-content:center}
 .hero-num-sm{font-size:40px}
 /* compact Active-learners card: title + number only, no subtext */
 .hero-mini{flex:0 0 auto;padding:16px 20px}
@@ -631,7 +553,6 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 /* gradient hero stat cards (Active learners / Team badges) */
 .hero-card{border-radius:var(--radius);padding:24px 26px;color:#fff}
 .hero-purple{background:linear-gradient(135deg,#A634FF,#FF4398);box-shadow:0 12px 30px rgba(166,52,255,.28)}
-.hero-blue{background:linear-gradient(135deg,#2ACCFF,#5400DC);box-shadow:0 12px 30px rgba(84,0,220,.24)}
 .hero-lab{display:flex;align-items:center;gap:10px;font-size:13.5px;font-weight:700;opacity:.94}
 .hero-num{font-size:52px;font-weight:800;letter-spacing:-.03em;margin-top:10px;line-height:1}
 .hero-sub{font-size:13.5px;font-weight:600;opacity:.94;margin-top:8px}

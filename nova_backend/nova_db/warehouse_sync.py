@@ -104,7 +104,13 @@ def _qident(name: str) -> str:
 
 
 def _load_table(conn: sqlite3.Connection, table_name: str) -> int:
-    """Stream one API table into SQLite; returns rows inserted."""
+    """Stream one API table into SQLite; returns rows inserted.
+
+    table_name always comes from the hardcoded API_TABLES list (never request
+    input); column names come from the API response and are quoted via
+    _qident() before being interpolated into DDL/DML, so the f-strings below
+    are safe by construction, not string-built from untrusted values.
+    """
     total = 0
     columns: list[str] | None = None
     for page in fetch_table(table_name):

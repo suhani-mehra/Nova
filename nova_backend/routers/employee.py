@@ -24,67 +24,11 @@ from services.recommendation_service import get_recommendation
 from services.team_service import (
     get_team_highlights,
     get_team_accomplishments,
-    get_team_course_popularity,
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 _executor = ThreadPoolExecutor(max_workers=8)
-
-# ── Placeholder data (dev mode, classmate_user_id is None) ───────────────────
-
-_PLACEHOLDER_DASHBOARD = {
-    "tier": {
-        "current":      "gold",
-        "next":         "diamond",
-        "progress":     65,
-        "percentile":   18.4,
-        "total_credits": 142.5,
-    },
-    "streak": {
-        "current":       7,
-        "week_map":      [True, True, False, True, True, True, False],
-        "learning_time": "3h 20m",
-    },
-    "skills": {
-        "axes":       ["AI", "Cloud", "Frontend", "Backend", "Data"],
-        "this_month": [72, 45, 30, 60, 50],
-        "last_month": [60, 40, 35, 55, 48],
-        "delta":      4,
-    },
-    "continue_course": {
-        "name":      "Introduction to Azure OpenAI",
-        "progress":  42,
-        "course_id": 101,
-    },
-    "recommended": {
-        "course_name": "MLOps: Model Deployment at Scale",
-        "reason":      "Builds on your recent AI coursework",
-        "course_id":   202,
-    },
-    "badges": [],
-}
-
-_PLACEHOLDER_TEAM = {
-    "accomplishments": [
-        {
-            "employee_name":    "Alice Kumar",
-            "course_name":      "Azure Fundamentals",
-            "completed_on":     "2025-06-10",
-            "learning_credits": 8.0,
-            "category":         "Cloud",
-        }
-    ],
-    "popular_courses": [
-        {"course_name": "Python for Data Science", "completion_count": 5, "category": "Data"}
-    ],
-    "highlights": {
-        "top_learner":   {"name": "Alice Kumar",  "credits": 24.0},
-        "most_improved": {"name": "Bob Singh",    "delta": 12.0},
-        "streak_leader": {"name": "Carol Thomas", "streak": 14},
-    },
-}
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -119,6 +63,8 @@ def _get_team_congrats_week(manager_id: int) -> int:
     try:
         conn = sqlite3.connect(str(_SQLITE_DB))
         conn.row_factory = sqlite3.Row
+        # Placeholder count for IN(...), not a value — each id is still bound
+        # through the parameterised '?' slots below, never concatenated.
         ph = ",".join("?" * len(uids))
         row = conn.execute(
             f"""
@@ -161,6 +107,8 @@ def _filter_training_modules(courses: list) -> list:
     try:
         conn = sqlite3.connect(str(_SQLITE_DB))
         conn.row_factory = sqlite3.Row
+        # Placeholder count for IN(...), not a value — each name is still bound
+        # through the parameterised '?' slots below, never concatenated.
         ph = ",".join("?" * len(names))
         rows = conn.execute(
             f"SELECT item_name, ai, cloud, frontend, backend, data FROM course_vertical_scores WHERE item_name IN ({ph})",

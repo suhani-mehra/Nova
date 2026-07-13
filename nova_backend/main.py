@@ -259,8 +259,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.nova_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization", "X-Nova-Dev-User", "X-Nova-Impersonate"],
 )
 
 
@@ -297,7 +297,7 @@ async def admin_sync(user: CurrentUser = Depends(get_current_user)):
         counts = await loop.run_in_executor(None, sync_all)
     except Exception as exc:
         logger.error("Manual warehouse sync failed: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Sync failed: {exc}")
+        raise HTTPException(status_code=502, detail="Warehouse sync failed")
     return {"ok": True, "tables": counts}
 
 
