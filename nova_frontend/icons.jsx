@@ -7,30 +7,30 @@ function svg(paths, props={}, vb=24){
     fill:'none', stroke:extra.color||'currentColor', strokeWidth:extra.sw||1.8,
     strokeLinecap:'round', strokeLinejoin:'round', ...props, ...(extra.style?{style:extra.style}:{})}, paths);
 }
-const P = (d,k)=>h('path',{d,key:k});
-const C = (cx,cy,r,k)=>h('circle',{cx,cy,r,key:k});
+const pathEl = (d,k)=>h('path',{d,key:k});
+const circleEl = (cx,cy,r,k)=>h('circle',{cx,cy,r,key:k});
 
 const Icons = {
-  clock: svg([C(12,12,9,'a'), P('M12 7v5l3 2','b')]),
-  users: svg([P('M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1','a'), C(9,8,3.2,'b'), P('M21 19v-1a4 4 0 0 0-3-3.87','c'), P('M16 4.2a4 4 0 0 1 0 7.6','d')]),
-  chevron: svg([P('M6 9l6 6 6-6','a')]),
-  switch: svg([P('M16 3l4 4-4 4','a'), P('M20 7H8a4 4 0 0 0-4 4','b'), P('M8 21l-4-4 4-4','c'), P('M4 17h12a4 4 0 0 0 4-4','d')]),
-  logout: svg([P('M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4','a'), P('M16 17l5-5-5-5','b'), P('M21 12H9','c')]),
-  settings: svg([C(12,12,3,'a'), P('M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 2.6 14H2.5a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 7a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 10 2.6V2.5a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 2.7 1.1 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0 1.1 2.7h.1a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.6 1z','b')]),
-  book: svg([P('M4 19.5A2.5 2.5 0 0 1 6.5 17H20','a'), P('M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z','b')]),
-  clap: svg([P('M11 11l-1.6-1.6a1.5 1.5 0 0 0-2.1 2.1l3.3 3.3','a'), P('M13 13l3.4 3.4a1.5 1.5 0 0 0 2.1-2.1L13.7 9.2','b'), P('M8.5 8.5l3 3','c'), P('M5 6l-1-2M9 4l-.5-2M13 5l1-2','d')]),
-  trend: svg([P('M3 17l6-6 4 4 8-8','a'), P('M17 7h4v4','b')]),
-  arrow: svg([P('M5 12h14','a'), P('M13 6l6 6-6 6','b')]),
-  spark: svg([P('M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z','a')]),
-  shield: svg([P('M12 3l8 3v5c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6l8-3z','a'), P('M9 12l2 2 4-4','b')]),
-  alert: svg([P('M12 3l9 16H3l9-16z','a'), P('M12 10v4','b'), P('M12 17.5v.01','c')]),
-  target: svg([C(12,12,9,'a'), C(12,12,5,'b'), C(12,12,1.4,'c')]),
-  up: svg([P('M12 19V5','a'), P('M6 11l6-6 6 6','b')]),
-  down: svg([P('M12 5v14','a'), P('M6 13l6 6 6-6','b')]),
-  flat: svg([P('M5 12h14','a')]),
-  fire: svg([P('M12 3c2 3 1 5 3 7 1.5 1.5 3 3 3 6a6 6 0 0 1-12 0c0-2 1-3.5 2-4.5C9 9 11 8 12 3z','a')]),
-  sun: svg([C(12,12,4,'a'), P('M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4','b')]),
-  moon: svg([P('M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z','a')]),
+  clock: svg([circleEl(12,12,9,'a'), pathEl('M12 7v5l3 2','b')]),
+  users: svg([pathEl('M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1','a'), circleEl(9,8,3.2,'b'), pathEl('M21 19v-1a4 4 0 0 0-3-3.87','c'), pathEl('M16 4.2a4 4 0 0 1 0 7.6','d')]),
+  chevron: svg([pathEl('M6 9l6 6 6-6','a')]),
+  switch: svg([pathEl('M16 3l4 4-4 4','a'), pathEl('M20 7H8a4 4 0 0 0-4 4','b'), pathEl('M8 21l-4-4 4-4','c'), pathEl('M4 17h12a4 4 0 0 0 4-4','d')]),
+  logout: svg([pathEl('M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4','a'), pathEl('M16 17l5-5-5-5','b'), pathEl('M21 12H9','c')]),
+  settings: svg([circleEl(12,12,3,'a'), pathEl('M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 2.6 14H2.5a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 7a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 10 2.6V2.5a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 2.7 1.1 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0 1.1 2.7h.1a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.6 1z','b')]),
+  book: svg([pathEl('M4 19.5A2.5 2.5 0 0 1 6.5 17H20','a'), pathEl('M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z','b')]),
+  clap: svg([pathEl('M11 11l-1.6-1.6a1.5 1.5 0 0 0-2.1 2.1l3.3 3.3','a'), pathEl('M13 13l3.4 3.4a1.5 1.5 0 0 0 2.1-2.1L13.7 9.2','b'), pathEl('M8.5 8.5l3 3','c'), pathEl('M5 6l-1-2M9 4l-.5-2M13 5l1-2','d')]),
+  trend: svg([pathEl('M3 17l6-6 4 4 8-8','a'), pathEl('M17 7h4v4','b')]),
+  arrow: svg([pathEl('M5 12h14','a'), pathEl('M13 6l6 6-6 6','b')]),
+  spark: svg([pathEl('M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z','a')]),
+  shield: svg([pathEl('M12 3l8 3v5c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6l8-3z','a'), pathEl('M9 12l2 2 4-4','b')]),
+  alert: svg([pathEl('M12 3l9 16H3l9-16z','a'), pathEl('M12 10v4','b'), pathEl('M12 17.5v.01','c')]),
+  target: svg([circleEl(12,12,9,'a'), circleEl(12,12,5,'b'), circleEl(12,12,1.4,'c')]),
+  up: svg([pathEl('M12 19V5','a'), pathEl('M6 11l6-6 6 6','b')]),
+  down: svg([pathEl('M12 5v14','a'), pathEl('M6 13l6 6 6-6','b')]),
+  flat: svg([pathEl('M5 12h14','a')]),
+  fire: svg([pathEl('M12 3c2 3 1 5 3 7 1.5 1.5 3 3 3 6a6 6 0 0 1-12 0c0-2 1-3.5 2-4.5C9 9 11 8 12 3z','a')]),
+  sun: svg([circleEl(12,12,4,'a'), pathEl('M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4','b')]),
+  moon: svg([pathEl('M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z','a')]),
 };
 
 /* course vertical → FontAwesome solid icon (Kit script auto-swaps <i> for SVG).

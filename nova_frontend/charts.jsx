@@ -13,6 +13,20 @@ function _tipStyle(fx, fy){
   return { left: (fx*100)+'%', top: (fy*100)+'%', transform: `translate(${tx}, ${ty})` };
 }
 
+/* Shared y-axis gridline + %-suffixed label row, used by LineChart,
+   RegionProficiencyChart, ScatterChart, and QuadrantChart. */
+function YAxisGrid({yticks, iy, padL, padR, W, fontSize=11.5, labelOffset=10}){
+  return yticks.map(t=>h('g',{key:'y'+t},
+    h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t),stroke:'var(--chart-grid)',strokeWidth:1}),
+    h('text',{x:padL-labelOffset,y:iy(t)+4,textAnchor:'end',fontSize,fontWeight:600,fill:'var(--chart-label)'}, t+'%')
+  ));
+}
+
+/* Shared day-labeled x-axis ticks, used by ScatterChart and QuadrantChart. */
+function XDayTicks({xticks, ix, y, fontSize=11.5}){
+  return xticks.map(t=>h('text',{key:'x'+t,x:ix(t),y,textAnchor:'middle',fontSize,fontWeight:600,fill:'var(--chart-label)'}, t+'d'));
+}
+
 /* ---------- Tier progression track ---------- */
 function TierTrack({tiers, currentKey}){
   const curIdx = tiers.findIndex(t=>t.key===currentKey);
@@ -88,10 +102,7 @@ function LineChart({months, proficiency, active, target, total}){
           h('stop',{offset:'100%',stopColor:'#FF4398'}))
       ),
       // y grid + labels
-      yticks.map(t=>h('g',{key:'y'+t},
-        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t),stroke:'var(--chart-grid)',strokeWidth:1}),
-        h('text',{x:padL-10,y:iy(t)+4,textAnchor:'end',fontSize:11.5,fontWeight:600,fill:'var(--chart-label)'}, t+'%')
-      )),
+      YAxisGrid({yticks, iy, padL, padR, W}),
       // target line
       h('line',{x1:padL,y1:iy(target),x2:W-padR,y2:iy(target),stroke:'#FF4398',strokeWidth:1.6,strokeDasharray:'6 5',opacity:.55}),
       h('text',{x:W-padR,y:iy(target)-7,textAnchor:'end',fontSize:11,fontWeight:800,fill:'#FF4398'}, `Target ${target}%`),
@@ -153,10 +164,7 @@ function RegionProficiencyChart({data}){
   return h('div',{style:{position:'relative'}},
     h('svg',{viewBox:`0 0 ${W} ${H}`, width:'100%', onMouseLeave:()=>setHover(null)},
       // y grid + labels
-      yticks.map(t=>h('g',{key:'y'+t},
-        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t), stroke:'var(--chart-grid)', strokeWidth:1}),
-        h('text',{x:padL-10,y:iy(t)+4,textAnchor:'end',fontSize:11.5,fontWeight:600,fill:'var(--chart-label)'}, t+'%')
-      )),
+      YAxisGrid({yticks, iy, padL, padR, W}),
       // per-level groups
       levels.map((lv,li)=>{
         const gl=groupLeft(li);
@@ -287,12 +295,9 @@ function ScatterChart({points, selectedId, onSelect, compact}){
   return h('div',{style:{position:'relative'}},
     h('svg',{viewBox:`0 0 ${W} ${H}`, width:'100%', onMouseLeave:()=>setHover(null)},
       // y grid + labels (%)
-      yticks.map(t=>h('g',{key:'y'+t},
-        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t),stroke:'var(--chart-grid)',strokeWidth:1}),
-        h('text',{x:padL-7,y:iy(t)+4,textAnchor:'end',fontSize:fs,fontWeight:600,fill:'var(--chart-label)'}, t+'%')
-      )),
+      YAxisGrid({yticks, iy, padL, padR, W, fontSize:fs, labelOffset:7}),
       // x ticks + labels (days)
-      uniqX.map(t=>h('text',{key:'x'+t,x:ix(t),y:H-padB+20,textAnchor:'middle',fontSize:fs,fontWeight:600,fill:'var(--chart-label)'}, t+'d')),
+      XDayTicks({xticks:uniqX, ix, y:H-padB+20, fontSize:fs}),
       // axis titles — x below (horizontal), y rotated sideways in the left gutter
       h('text',{x:(padL+(W-padR))/2,y:H-6,textAnchor:'middle',fontSize:fs,fontWeight:800,fill:'var(--chart-label)'}, 'Active days'),
       h('text',{transform:`rotate(-90 11 ${midY})`,x:11,y:midY,textAnchor:'middle',fontSize:fs,fontWeight:800,fill:'var(--chart-label)'}, 'AI proficiency'),
@@ -363,12 +368,9 @@ function QuadrantChart({data, highlightIds, onHover, onSelect}){
   return h('div',{style:{position:'relative'}},
     h('svg',{viewBox:`0 0 ${W} ${H}`, width:'100%', onMouseLeave:_leave},
       // y grid + labels (%)
-      yticks.map(t=>h('g',{key:'y'+t},
-        h('line',{x1:padL,y1:iy(t),x2:W-padR,y2:iy(t),stroke:'var(--chart-grid)',strokeWidth:1}),
-        h('text',{x:padL-10,y:iy(t)+4,textAnchor:'end',fontSize:11.5,fontWeight:600,fill:'var(--chart-label)'}, t+'%')
-      )),
+      YAxisGrid({yticks, iy, padL, padR, W}),
       // x labels (days)
-      xticks.map(t=>h('text',{key:'x'+t,x:ix(t),y:H-padB+20,textAnchor:'middle',fontSize:11.5,fontWeight:600,fill:'var(--chart-label)'}, t+'d')),
+      XDayTicks({xticks, ix, y:H-padB+20}),
       // quadrant crosshair (days midpoint × proficiency 50)
       h('line',{x1:ix(maxX/2),y1:padT,x2:ix(maxX/2),y2:H-padB,stroke:'var(--chart-label)',strokeWidth:1.4,strokeDasharray:'6 5',opacity:.5}),
       h('line',{x1:padL,y1:iy(50),x2:W-padR,y2:iy(50),stroke:'var(--chart-label)',strokeWidth:1.4,strokeDasharray:'6 5',opacity:.5}),
@@ -386,4 +388,4 @@ function QuadrantChart({data, highlightIds, onHover, onSelect}){
   );
 }
 
-Object.assign(window,{TierTrack, RadarChart, LineChart, RegionProficiencyChart, DonutChart, ScatterChart, QuadrantChart});
+Object.assign(window,{TierTrack, RadarChart, LineChart, RegionProficiencyChart, DonutChart, ScatterChart, QuadrantChart, _fmtNum});

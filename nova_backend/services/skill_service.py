@@ -75,15 +75,69 @@ def _keyword_scores(course_name: str) -> dict[str, int]:
     return {ax: (70 if ax == matched else 0) for ax in AXES}
 
 
-def calculate_skill_radar(user_id: int, conn=None) -> dict:
-    from nova_db.gpt_cache import get_cache, set_cache
-    from nova_db.course_scores import get_scores_for_items
+def _build_skill_items(completed: list, certs: list, lc_items: list) -> tuple[list[dict], list[tuple]]:
+    """Normalise one user's completed-courses / certs / learning-credit rows
+    into a uniform item list plus the (type, id) pairs needed for a batched
+    score_map lookup. LC items are deduplicated by topic (keeps the first
+    occurrence per topic) — shared by calculate_skill_radar (one user) and
+    get_team_skill_scores (called once per uid on that uid's row subset)."""
+    lookup_pairs: list[tuple[str, int]] = []
+    items: list[dict] = []
+    for r in completed:
+        cat_id = r["second_level_category_id"]
+        name   = r["course_name"] or ""
+        co     = r["completed_on"]
+        items.append({"type": "course", "cat_id": cat_id, "name": name, "completed_on": co})
+        if cat_id:
+            lookup_pairs.append(("course", int(cat_id)))
+    for r in certs:
+        cert_id = r["certificate_id"]
+        name    = r["course_name"] or ""
+        co      = r["completed_on"]
+        items.append({"type": "cert", "cert_id": cert_id, "name": name, "completed_on": co})
+        if cert_id:
+            lookup_pairs.append(("cert", int(cert_id)))
+    seen_lc_topics: set[int] = set()
+    for r in lc_items:
+        name = r["course_name"] or ""
+        co   = r["completed_on"]
+        if not name:
+            continue
+        tid = _lc_topic_id(name)
+        if tid in seen_lc_topics:
+            continue  # deduplicate by topic per employee
+        seen_lc_topics.add(tid)
+        items.append({"type": "lc", "lc_id": tid, "name": name, "completed_on": co})
+        lookup_pairs.append(("lc", tid))
+    return items, lookup_pairs
 
-    cached = get_cache(f"classify_{user_id}")
-    if cached:
-        logger.info("Cache hit for classify_%s", user_id)
-        return cached["result"]
 
+def _resolve_item_score(item: dict, score_map: dict) -> dict:
+    """Look up an item's pre-scored 5-axis vector from score_map by
+    (type, id); falls back to the keyword scorer when not pre-scored."""
+    if item["type"] == "course" and item.get("cat_id"):
+        sc = score_map.get(("course", int(item["cat_id"])))
+    elif item["type"] == "cert" and item.get("cert_id"):
+        sc = score_map.get(("cert", int(item["cert_id"])))
+    elif item["type"] == "lc" and item.get("lc_id"):
+        sc = score_map.get(("lc", int(item["lc_id"])))
+    else:
+        sc = None
+    if sc is None:
+        sc = _keyword_scores(item["name"])
+    return sc
+
+
+def _normalize_axes(raw: dict) -> dict:
+    """Power-curve normalize a raw per-axis accumulation dict into 0-100
+    scores. Shared formula: score = (raw / MASTERY_THRESHOLD) ^ MASTERY_POWER * 100."""
+    return {ax: round(min(100.0, (raw[ax] / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1) for ax in AXES}
+
+
+def _fetch_skill_source_rows(user_id: int) -> tuple:
+    """The 3 raw row sources for one user's skill radar: completed courses,
+    approved certifications, and learning-credit items. Returns
+    (completed, certs, lc_items)."""
     completed = query(
         """
         SELECT second_level_category_id, course_name, completed_on
@@ -126,6 +180,19 @@ def calculate_skill_radar(user_id: int, conn=None) -> dict:
         """,
         (user_id,),
     )
+    return completed, certs, lc_items
+
+
+def calculate_skill_radar(user_id: int, conn=None) -> dict:
+    from nova_db.gpt_cache import get_cache, set_cache
+    from nova_db.course_scores import get_scores_for_items
+
+    cached = get_cache(f"classify_{user_id}")
+    if cached:
+        logger.info("Cache hit for classify_%s", user_id)
+        return cached["result"]
+
+    completed, certs, lc_items = _fetch_skill_source_rows(user_id)
 
     empty_result = {
         "axes":        AXES,
@@ -139,36 +206,7 @@ def calculate_skill_radar(user_id: int, conn=None) -> dict:
         set_cache(f"classify_{user_id}", empty_result, "gpt", ttl_hours=25)
         return empty_result
 
-    # Build lookup pairs and item list
-    lookup_pairs: list[tuple[str, int]] = []
-    items: list[dict] = []
-    for r in completed:
-        cat_id = r["second_level_category_id"]
-        name   = r["course_name"] or ""
-        co     = r["completed_on"]
-        items.append({"type": "course", "cat_id": cat_id, "name": name, "completed_on": co})
-        if cat_id:
-            lookup_pairs.append(("course", int(cat_id)))
-    for r in certs:
-        cert_id = r["certificate_id"]
-        name    = r["course_name"] or ""
-        co      = r["completed_on"]
-        items.append({"type": "cert", "cert_id": cert_id, "name": name, "completed_on": co})
-        if cert_id:
-            lookup_pairs.append(("cert", int(cert_id)))
-    seen_lc_topics: set[int] = set()
-    for r in lc_items:
-        name = r["course_name"] or ""
-        co   = r["completed_on"]
-        if not name:
-            continue
-        tid = _lc_topic_id(name)
-        if tid in seen_lc_topics:
-            continue  # deduplicate by topic per employee
-        seen_lc_topics.add(tid)
-        items.append({"type": "lc", "lc_id": tid, "name": name, "completed_on": co})
-        lookup_pairs.append(("lc", tid))
-
+    items, lookup_pairs = _build_skill_items(completed, certs, lc_items)
     score_map = get_scores_for_items(list(set(lookup_pairs)))
 
     today          = date.today()
@@ -183,18 +221,7 @@ def calculate_skill_radar(user_id: int, conn=None) -> dict:
             continue
         co_date = co.date() if hasattr(co, "date") else co
 
-        # Look up pre-scored vertical scores from SQLite
-        if item["type"] == "course" and item.get("cat_id"):
-            sc = score_map.get(("course", int(item["cat_id"])))
-        elif item["type"] == "cert" and item.get("cert_id"):
-            sc = score_map.get(("cert", int(item["cert_id"])))
-        elif item["type"] == "lc" and item.get("lc_id"):
-            sc = score_map.get(("lc", int(item["lc_id"])))
-        else:
-            sc = None
-
-        if sc is None:
-            sc = _keyword_scores(item["name"])
+        sc = _resolve_item_score(item, score_map)
 
         for ax in AXES:
             v = float(sc.get(ax, 0))
@@ -202,8 +229,8 @@ def calculate_skill_radar(user_id: int, conn=None) -> dict:
             if co_date < start_of_month:
                 prev_raw[ax] += v
 
-    this_norm = {ax: round(min(100.0, (all_raw[ax] / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1) for ax in AXES}
-    last_norm = {ax: round(min(100.0, (prev_raw[ax] / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1) for ax in AXES}
+    this_norm = _normalize_axes(all_raw)
+    last_norm = _normalize_axes(prev_raw)
 
     delta = round(sum(this_norm[AXES[i]] - last_norm[AXES[i]] for i in range(5)) / 5)
 
@@ -296,35 +323,25 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
             lc_rows = []
             queries_ok = False
 
-        # Collect all unique (type, id) pairs across all users for a single batch SQLite lookup
-        lookup_pairs: set[tuple[str, int]] = set()
-        uid_items: dict[int, list[dict]] = {uid: [] for uid in uncached_uids}
-
+        # Group raw rows by user, then build each uid's item list + lookup
+        # pairs via the shared per-user helper (also used by
+        # calculate_skill_radar); merge all uids' pairs for one batch lookup.
+        course_by_uid: dict[int, list] = {uid: [] for uid in uncached_uids}
+        cert_by_uid:   dict[int, list] = {uid: [] for uid in uncached_uids}
+        lc_by_uid:     dict[int, list] = {uid: [] for uid in uncached_uids}
         for r in course_rows:
-            uid = r["user_id"]
-            cat_id = r["second_level_category_id"]
-            name   = r["course_name"] or ""
-            co     = r["completed_on"]
-            uid_items[uid].append({"type": "course", "cat_id": cat_id, "name": name, "completed_on": co})
-            if cat_id:
-                lookup_pairs.add(("course", int(cat_id)))
+            course_by_uid[r["user_id"]].append(r)
         for r in cert_rows:
-            uid = r["user_id"]
-            cert_id = r["certificate_id"]
-            name    = r["course_name"] or ""
-            co      = r["completed_on"]
-            uid_items[uid].append({"type": "cert", "cert_id": cert_id, "name": name, "completed_on": co})
-            if cert_id:
-                lookup_pairs.add(("cert", int(cert_id)))
+            cert_by_uid[r["user_id"]].append(r)
         for r in lc_rows:
-            uid  = r["user_id"]
-            name = r["course_name"] or ""
-            co   = r["completed_on"]
-            if not name:
-                continue
-            tid = _lc_topic_id(name)
-            uid_items[uid].append({"type": "lc", "lc_id": tid, "name": name, "completed_on": co})
-            lookup_pairs.add(("lc", tid))
+            lc_by_uid[r["user_id"]].append(r)
+
+        items_by_uid: dict[int, list[dict]] = {}
+        lookup_pairs: set[tuple[str, int]] = set()
+        for uid in uncached_uids:
+            items, pairs = _build_skill_items(course_by_uid[uid], cert_by_uid[uid], lc_by_uid[uid])
+            items_by_uid[uid] = items
+            lookup_pairs.update(pairs)
 
         score_map = get_scores_for_items(list(lookup_pairs))
 
@@ -334,22 +351,8 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
         for uid in uncached_uids:
             ur   = {ax: 0.0 for ax in AXES}
             prev = {ax: 0.0 for ax in AXES}
-            seen_lc: set[int] = set()
-            for item in uid_items[uid]:
-                if item["type"] == "course" and item.get("cat_id"):
-                    sc = score_map.get(("course", int(item["cat_id"])))
-                elif item["type"] == "cert" and item.get("cert_id"):
-                    sc = score_map.get(("cert", int(item["cert_id"])))
-                elif item["type"] == "lc" and item.get("lc_id"):
-                    tid = int(item["lc_id"])
-                    if tid in seen_lc:
-                        continue
-                    seen_lc.add(tid)
-                    sc = score_map.get(("lc", tid))
-                else:
-                    sc = None
-                if sc is None:
-                    sc = _keyword_scores(item["name"])
+            for item in items_by_uid[uid]:
+                sc = _resolve_item_score(item, score_map)
                 co = item.get("completed_on")
                 co_date = co.date() if co and hasattr(co, "date") else co
                 for ax in AXES:
@@ -358,8 +361,8 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
                     if co_date and co_date < start_of_month:
                         prev[ax] += v
 
-            this_norm = {ax: round(min(100.0, (ur[ax]   / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1) for ax in AXES}
-            last_norm = {ax: round(min(100.0, (prev[ax] / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1) for ax in AXES}
+            this_norm = _normalize_axes(ur)
+            last_norm = _normalize_axes(prev)
             delta     = round(sum(this_norm[AXES[i]] - last_norm[AXES[i]] for i in range(5)) / 5)
 
             raw_scores[uid] = ur
@@ -384,9 +387,7 @@ def get_team_skill_scores(user_ids: list[int]) -> dict:
     result: dict[int, dict] = {}
     for uid in all_uids:
         ur = raw_scores.get(uid, {ax: 0.0 for ax in AXES})
-        normed: dict[str, float] = {}
-        for ax in AXES:
-            normed[ax] = round(min(100.0, (ur[ax] / MASTERY_THRESHOLD) ** MASTERY_POWER * 100), 1)
+        normed = _normalize_axes(ur)
         normed["_scored_by"] = cached_results.get(uid, {}).get("scored_by", "gpt")
         result[uid] = normed
 

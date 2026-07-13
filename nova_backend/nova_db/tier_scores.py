@@ -45,7 +45,8 @@ def get_tier_scores_age_hours() -> float | None:
     try:
         updated = datetime.fromisoformat(row["ts"])
         return (datetime.now().replace(microsecond=0) - updated).total_seconds() / 3600
-    except Exception:
+    except Exception as exc:
+        logger.warning("get_tier_scores_age_hours: failed to parse updated_at=%r: %s", row["ts"], exc)
         return None
 
 
@@ -78,9 +79,8 @@ def _compute_population_scores(target_month: date):
     award_monthly_badges (a completed prior month) so the formula is literally
     identical in both paths (tier invariant #1)."""
     from core.database import query
-    from core.config import settings
     from services.skill_service import get_team_skill_scores
-    from services.tier_service import _month_bounds
+    from services.tier_service import _month_bounds, _score_tier_components
 
     start, end_excl, days_in_month = _month_bounds(target_month)
 
@@ -89,7 +89,7 @@ def _compute_population_scores(target_month: date):
     # month-zero users simply rank near the bottom (intended monthly reset).
     pop_rows = query(
         """
-        SELECT user_id, COALESCE(SUM(learning_credits), 0) AS tc
+        SELECT user_id, COALESCE(SUM(learning_credits), 0) AS completed_credits
         FROM vw_classmate_trainings
         WHERE status = 4052
         GROUP BY user_id
@@ -103,14 +103,14 @@ def _compute_population_scores(target_month: date):
     # Month-to-date completed credits (zero-filled for non-earners this month).
     mc_rows = query(
         """
-        SELECT user_id, COALESCE(SUM(learning_credits), 0) AS tc
+        SELECT user_id, COALESCE(SUM(learning_credits), 0) AS completed_credits
         FROM vw_classmate_trainings
         WHERE status = 4052 AND completed_on >= ? AND completed_on < ?
         GROUP BY user_id
         """,
         (start, end_excl),
     )
-    credits_map: dict[int, float] = {int(r["user_id"]): float(r["tc"] or 0) for r in mc_rows}
+    credits_map: dict[int, float] = {int(r["user_id"]): float(r["completed_credits"] or 0) for r in mc_rows}
 
     # Month-to-date recency credits + monthly company average.
     recency_rows = query(
@@ -159,30 +159,17 @@ def _compute_population_scores(target_month: date):
     logger.info("Computing skill scores for %d users...", len(all_uids))
     skill_map = get_team_skill_scores(all_uids)
 
-    # Composite score per user — identical divisors/weights to compute_and_cache_tiers.
+    # Composite score per user — uses the same formula as compute_and_cache_tiers.
     scores: dict[int, float] = {}
     for uid in all_uids:
-        tc         = credits_map.get(uid, 0.0)
-        recency_m  = recency_map.get(uid, 0.0)
-        active_m   = consistency_map.get(uid, 0)
+        completed_credits = credits_map.get(uid, 0.0)
+        recency_m         = recency_map.get(uid, 0.0)
+        active_m          = consistency_map.get(uid, 0)
+        skill_vals = [v for k, v in skill_map.get(uid, {}).items() if not k.startswith("_")]
 
-        credits_score     = round(min(tc / settings.monthly_credit_target * 100, 100), 1)
-        consistency_score = round(min(active_m / days_in_month * 100, 100), 1)
-        recency_score     = round(min(recency_m / monthly_avg / 3 * 100, 100), 1)
-
-        if uid in skill_map:
-            skill_vals = [v for k, v in skill_map[uid].items() if not k.startswith("_")]
-            skill_score = round(sum(skill_vals) / max(len(skill_vals), 1), 1)
-        else:
-            skill_score = 0.0
-
-        tier_score = (
-            credits_score     * 0.30
-            + skill_score     * 0.35
-            + consistency_score * 0.20
-            + recency_score   * 0.15
-        )
-        scores[uid] = round(tier_score, 2)
+        result = _score_tier_components(
+            completed_credits, recency_m, active_m, days_in_month, monthly_avg, skill_vals)
+        scores[uid] = round(result["tier_score"], 2)
 
     return all_uids, scores, skill_map, (credits_map, recency_map, consistency_map), monthly_avg
 

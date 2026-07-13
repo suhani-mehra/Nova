@@ -124,10 +124,10 @@ def _gpt_score_batch(items: list[dict]) -> list[dict]:
         return _keyword_fallback_scores(items)
 
 
-def score_all_courses() -> None:
-    init_course_scores_table()
-    logger.info("score_all_courses: starting catalogue scoring job")
-
+def _fetch_catalogue_rows() -> tuple:
+    """The 3 raw catalogue sources: courses, certificates, LC topics. Each
+    query has its own try/except (defaults to []) so one source failing
+    doesn't block scoring the others."""
     try:
         course_rows = query(
             """
@@ -172,6 +172,11 @@ def score_all_courses() -> None:
         logger.error("score_all_courses: could not fetch LC items: %s", exc)
         lc_rows = []
 
+    return course_rows, cert_rows, lc_rows
+
+
+def _normalize_catalogue_items(course_rows, cert_rows, lc_rows) -> list:
+    """Merge the 3 catalogue sources into one uniform {type, id, name} list."""
     all_items: list[dict] = []
     for r in course_rows:
         if r.get("id") and r.get("name"):
@@ -183,22 +188,26 @@ def score_all_courses() -> None:
         name = r.get("name") or ""
         if name:
             all_items.append({"type": "lc", "id": lc_topic_id(name), "name": name})
+    return all_items
 
+
+def _diff_unscored_items(all_items: list) -> list:
+    """Items not yet present in course_vertical_scores."""
     already_scored = get_scored_pairs()
     unscored = [
         item for item in all_items
         if (item["type"], item["id"]) not in already_scored
     ]
-
     logger.info(
         "score_all_courses: %d total items, %d already scored, %d to score",
         len(all_items), len(already_scored), len(unscored),
     )
+    return unscored
 
-    if not unscored:
-        logger.info("score_all_courses: nothing new to score")
-        return
 
+def _score_and_persist_batches(unscored: list) -> int:
+    """Scores `unscored` in _BATCH_SIZE chunks via GPT (with keyword fallback)
+    and persists each batch immediately. Returns the total newly-scored count."""
     total_scored = 0
     for batch_start in range(0, len(unscored), _BATCH_SIZE):
         batch = unscored[batch_start : batch_start + _BATCH_SIZE]
@@ -215,16 +224,39 @@ def score_all_courses() -> None:
         "score_all_courses: complete — %d new items scored (total in db: %d)",
         total_scored, get_scored_count(),
     )
+    return total_scored
+
+
+def _invalidate_trend_cache() -> None:
+    """Clear the cached ai_proficiency_trend result so it recomputes with the
+    newly scored items. Uses a direct sqlite3 connection rather than
+    gpt_cache.py's clear_by_prefix (which is prefix-match, not this exact-key
+    delete) — kept exactly as-is, not swapped, as part of this refactor."""
+    try:
+        import sqlite3 as _sqlite3
+        from pathlib import Path as _Path
+        _db = _Path(__file__).parent.parent / "nova_local.db"
+        with _sqlite3.connect(str(_db)) as _c:
+            _c.execute("DELETE FROM gpt_cache WHERE cache_key='ai_proficiency_trend'")
+            _c.commit()
+        logger.info("score_all_courses: ai_proficiency_trend cache cleared for recompute")
+    except Exception as exc:
+        logger.warning("score_all_courses: could not clear trend cache: %s", exc)
+
+
+def score_all_courses() -> None:
+    init_course_scores_table()
+    logger.info("score_all_courses: starting catalogue scoring job")
+
+    course_rows, cert_rows, lc_rows = _fetch_catalogue_rows()
+    all_items = _normalize_catalogue_items(course_rows, cert_rows, lc_rows)
+    unscored = _diff_unscored_items(all_items)
+
+    if not unscored:
+        logger.info("score_all_courses: nothing new to score")
+        return
+
+    total_scored = _score_and_persist_batches(unscored)
 
     if total_scored > 0:
-        # Invalidate trend cache so it recomputes with the newly scored items
-        try:
-            import sqlite3 as _sqlite3
-            from pathlib import Path as _Path
-            _db = _Path(__file__).parent.parent / "nova_local.db"
-            with _sqlite3.connect(str(_db)) as _c:
-                _c.execute("DELETE FROM gpt_cache WHERE cache_key='ai_proficiency_trend'")
-                _c.commit()
-            logger.info("score_all_courses: ai_proficiency_trend cache cleared for recompute")
-        except Exception as exc:
-            logger.warning("score_all_courses: could not clear trend cache: %s", exc)
+        _invalidate_trend_cache()

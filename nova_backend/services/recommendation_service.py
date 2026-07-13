@@ -32,17 +32,9 @@ def _get_client() -> AzureOpenAI:
     return _client
 
 
-def get_recommendation(user_id: int, conn=None) -> dict:
-    cached = get_cache(f"recommend_{user_id}")
-    if cached:
-        return cached["result"]
-
-    if user_id in _in_flight:
-        logger.info("Recommendation in-flight for user %s — using fallback", user_id)
-        return _fallback([], [])
-
-    # Completed courses (recent 10)
-    completed_rows = query(
+def _get_completed_course_names(user_id: int) -> list:
+    """Recent 10 completed course names, for the GPT prompt context."""
+    rows = query(
         """
         SELECT course_name
         FROM   vw_classmate_trainings
@@ -53,9 +45,11 @@ def get_recommendation(user_id: int, conn=None) -> dict:
         """,
         (user_id,),
     )
-    completed_names = [r["course_name"] for r in completed_rows]
+    return [r["course_name"] for r in rows]
 
-    inprogress_rows = query(
+
+def _get_in_progress_course(user_id: int) -> Optional[str]:
+    rows = query(
         """
         SELECT course_name
         FROM   vw_classmate_trainings
@@ -66,17 +60,23 @@ def get_recommendation(user_id: int, conn=None) -> dict:
         """,
         (user_id,),
     )
-    in_progress = inprogress_rows[0]["course_name"] if inprogress_rows else None
+    return rows[0]["course_name"] if rows else None
 
-    # Weak skill categories from cached radar
+
+def _detect_weak_skill_categories(user_id: int) -> list:
+    """Two weakest skill axes from the cached radar; falls back to a fixed
+    pair on any failure (radar computation, cache miss, etc.)."""
     try:
         radar = calculate_skill_radar(user_id)
         paired = sorted(zip(radar["this_month"], AXES))
-        weak_cats = [ax for _, ax in paired[:2]]
-    except Exception:
-        weak_cats = ["AI", "Cloud"]
+        return [ax for _, ax in paired[:2]]
+    except Exception as exc:
+        logger.warning("get_recommendation: skill radar failed for user_id=%s: %s", user_id, exc)
+        return ["AI", "Cloud"]
 
-    # Manager for popular courses context
+
+def _get_team_popular_courses(user_id: int) -> list:
+    """Top 5 courses completed by the user's teammates (same manager)."""
     manager_rows = query(
         """
         SELECT manager FROM dim_classmate_employee_profile
@@ -85,31 +85,33 @@ def get_recommendation(user_id: int, conn=None) -> dict:
         (user_id,),
     )
     manager_id = manager_rows[0]["manager"] if manager_rows else None
+    if not manager_id:
+        return []
 
-    popular_courses: list[str] = []
-    if manager_id:
-        pop_rows = query(
-            """
-            SELECT vt.course_name, COUNT(*) AS cnt
-            FROM   vw_classmate_trainings vt
-            JOIN   dim_classmate_employee_profile ep ON ep.user_id = vt.user_id
-            WHERE  ep.manager      = ?
-              AND  ep.is_active    = 1
-              AND  ep.is_deleted   = 0
-              AND  ep.etl_isactive = 1
-              AND  (ep.employee_id IS NULL OR UPPER(TRIM(ep.employee_id)) NOT LIKE 'TMP%')
-              AND  ep.country_code IS NOT NULL AND UPPER(TRIM(ep.country_code)) != 'OT'
-              AND  vt.status       = 4052
-            GROUP BY vt.course_name
-            ORDER BY cnt DESC
+    pop_rows = query(
+        """
+        SELECT vt.course_name, COUNT(*) AS cnt
+        FROM   vw_classmate_trainings vt
+        JOIN   dim_classmate_employee_profile ep ON ep.user_id = vt.user_id
+        WHERE  ep.manager      = ?
+          AND  ep.is_active    = 1
+          AND  ep.is_deleted   = 0
+          AND  ep.etl_isactive = 1
+          AND  (ep.employee_id IS NULL OR UPPER(TRIM(ep.employee_id)) NOT LIKE 'TMP%')
+          AND  ep.country_code IS NOT NULL AND UPPER(TRIM(ep.country_code)) != 'OT'
+          AND  vt.status       = 4052
+        GROUP BY vt.course_name
+        ORDER BY cnt DESC
         LIMIT 5
         """,
-            (manager_id,),
-        )
-        popular_courses = [r["course_name"] for r in pop_rows]
+        (manager_id,),
+    )
+    return [r["course_name"] for r in pop_rows]
 
-    # Catalogue excluding already completed
-    catalogue_rows = query(
+
+def _get_available_catalogue(user_id: int) -> list:
+    """Browsable courses the user hasn't completed yet."""
+    rows = query(
         """
         SELECT DISTINCT sc.id, sc.name
         FROM dim_classmate_second_level_category sc
@@ -129,18 +131,19 @@ def get_recommendation(user_id: int, conn=None) -> dict:
         """,
         (user_id,),
     )
-    catalogue = [{"id": r["id"], "name": r["name"]} for r in catalogue_rows]
+    return [{"id": r["id"], "name": r["name"]} for r in rows]
 
-    if not catalogue:
-        return {"course_id": None, "course_name": "No courses available",
-                "reason": "Catalogue is empty", "scored_by": "keywords"}
 
+def _build_candidate_list(catalogue: list, weak_cats: list) -> list:
+    """Top-20 GPT-prompt candidates, weak-skill categories first."""
     weak_set = set(weak_cats)
     preferred = [c for c in catalogue if _classify(c["name"]) in weak_set]
     others = [c for c in catalogue if c not in preferred]
-    send_list = (preferred + others)[:20]
+    return (preferred + others)[:20]
 
-    prompt = f"""You are a learning advisor for a tech professional.
+
+def _build_gpt_prompt(weak_cats, completed_names, popular_courses, in_progress, send_list) -> str:
+    return f"""You are a learning advisor for a tech professional.
 Recommend ONE course from the list below.
 Skill gaps: {weak_cats}
 Recently completed: {completed_names}
@@ -151,23 +154,54 @@ Available courses (id, name):
 Return ONLY valid JSON, no markdown:
 {{"course_id":<int>,"course_name":"<str>","reason":"<max 10 words>"}}"""
 
+
+def _call_gpt_for_recommendation(prompt: str) -> dict:
+    """Calls the GPT client and validates the response shape. Raises on any
+    failure (bad JSON, missing keys, wrong types) so the caller's existing
+    except -> fallback path handles it."""
+    client = _get_client()
+    response = client.chat.completions.create(
+        model=settings.openai_model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=120,
+        timeout=10,
+    )
+    raw = response.choices[0].message.content.strip()
+    result = json.loads(raw)
+    if not all(k in result for k in ("course_id", "course_name", "reason")):
+        raise ValueError("Missing keys in GPT response")
+    if not isinstance(result["course_id"], int):
+        raise ValueError("course_id must be int")
+    return result
+
+
+def get_recommendation(user_id: int, conn=None) -> dict:
+    cached = get_cache(f"recommend_{user_id}")
+    if cached:
+        return cached["result"]
+
+    if user_id in _in_flight:
+        logger.info("Recommendation in-flight for user %s — using fallback", user_id)
+        return _fallback([], [])
+
+    completed_names = _get_completed_course_names(user_id)
+    in_progress = _get_in_progress_course(user_id)
+    weak_cats = _detect_weak_skill_categories(user_id)
+    popular_courses = _get_team_popular_courses(user_id)
+    catalogue = _get_available_catalogue(user_id)
+
+    if not catalogue:
+        return {"course_id": None, "course_name": "No courses available",
+                "reason": "Catalogue is empty", "scored_by": "keywords"}
+
+    send_list = _build_candidate_list(catalogue, weak_cats)
+    prompt = _build_gpt_prompt(weak_cats, completed_names, popular_courses, in_progress, send_list)
+
     scored_by = "keywords"
     _in_flight.add(user_id)
     try:
-        client = _get_client()
-        response = client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=120,
-            timeout=10,
-        )
-        raw = response.choices[0].message.content.strip()
-        result = json.loads(raw)
-        if not all(k in result for k in ("course_id", "course_name", "reason")):
-            raise ValueError("Missing keys in GPT response")
-        if not isinstance(result["course_id"], int):
-            raise ValueError("course_id must be int")
+        result = _call_gpt_for_recommendation(prompt)
         scored_by = "gpt"
     except Exception as exc:
         logger.warning("OpenAI recommendation failed: %s — using fallback", exc)

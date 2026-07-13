@@ -335,7 +335,7 @@ function mapMe(data) {
 function applyTheme(mode) {
   const m = mode === 'dark' ? 'dark' : 'light';
   document.documentElement.dataset.theme = m;
-  try { localStorage.setItem('nova_theme', m); } catch (e) {}
+  try { localStorage.setItem('nova_theme', m); } catch (e) { console.warn('[Nova] failed to persist theme:', e); }
 }
 window.applyTheme = applyTheme;
 
@@ -359,18 +359,18 @@ async function loadManagerData(isExec) {
   if (isExec) fetches.push(apiGet('/api/manager/overview'));
   const [teamData, overviewData] = await Promise.all(fetches);
 
-  const M = { isExec: !!isExec, team: null, overview: null };
+  const mgrData = { isExec: !!isExec, team: null, overview: null };
   if (teamData) {
-    try { M.team = mapYourTeam(teamData); }
+    try { mgrData.team = mapYourTeam(teamData); }
     catch (e) { console.warn('[Nova] mapYourTeam failed:', e); }
   }
   if (isExec && overviewData) {
-    try { M.overview = mapOverview(overviewData); }
+    try { mgrData.overview = mapOverview(overviewData); }
     catch (e) { console.warn('[Nova] mapOverview failed:', e); }
   }
   // Static placeholder sections (no real data source yet) — see data.js.
-  M.static = window.NOVA.managerStatic || {};
-  window.NOVA.manager = M;
+  mgrData.static = window.NOVA.managerStatic || {};
+  window.NOVA.manager = mgrData;
 }
 
 async function initNova() {

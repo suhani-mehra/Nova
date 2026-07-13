@@ -37,12 +37,14 @@ def _revive(value):
         if _DATETIME_RE.match(value):
             try:
                 return datetime.fromisoformat(value)
-            except ValueError:
+            except ValueError as exc:
+                logger.warning("_revive: failed to parse datetime-shaped value %r: %s", value, exc)
                 return value
         if _DATE_RE.match(value):
             try:
                 return datetime.fromisoformat(value).date()
-            except ValueError:
+            except ValueError as exc:
+                logger.warning("_revive: failed to parse date-shaped value %r: %s", value, exc)
                 return value
     return value
 

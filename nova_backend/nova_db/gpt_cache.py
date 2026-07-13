@@ -20,6 +20,20 @@ def init_cache():
         )""")
         c.commit()
 
+def _row_to_cache_result(row, key: str, fn_name: str) -> dict | None:
+    """Shared row->result decode for get_cache/get_cache_stale: guards a
+    missing row and decodes the JSON result, logging (with fn_name for
+    traceability) and treating corrupted JSON as a cache miss rather than
+    raising."""
+    if not row:
+        return None
+    try:
+        return {"result": json.loads(row["result"]),
+                "scored_by": row["scored_by"]}
+    except Exception as exc:
+        logger.warning("%s: corrupted cache row for key=%s: %s", fn_name, key, exc)
+        return None
+
 def get_cache(key: str) -> dict | None:
     with _conn() as c:
         row = c.execute(
@@ -27,13 +41,7 @@ def get_cache(key: str) -> dict | None:
             "WHERE cache_key=? AND expires_at > datetime('now')",
             (key,)
         ).fetchone()
-    if not row:
-        return None
-    try:
-        return {"result": json.loads(row["result"]),
-                "scored_by": row["scored_by"]}
-    except Exception:
-        return None
+    return _row_to_cache_result(row, key, "get_cache")
 
 def get_cache_stale(key: str) -> dict | None:
     """Like get_cache but ignores expiry — for stale-while-revalidate reads."""
@@ -42,13 +50,7 @@ def get_cache_stale(key: str) -> dict | None:
             "SELECT result, scored_by FROM gpt_cache WHERE cache_key=?",
             (key,)
         ).fetchone()
-    if not row:
-        return None
-    try:
-        return {"result": json.loads(row["result"]),
-                "scored_by": row["scored_by"]}
-    except Exception:
-        return None
+    return _row_to_cache_result(row, key, "get_cache_stale")
 
 def set_cache(key: str, result: dict,
               scored_by: str, ttl_hours: int = 24):

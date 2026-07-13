@@ -3,9 +3,12 @@ services/streak_service.py
 Learning streak and weekly activity calculation.
 """
 
+import logging
 from datetime import date, timedelta
 
 from core.database import query
+
+logger = logging.getLogger(__name__)
 
 
 def calculate_streak(user_id: int, conn=None) -> dict:
@@ -119,6 +122,7 @@ def get_team_streaks(user_ids: list[int]) -> dict:
         else:
             try:
                 out[uid] = int(calculate_streak(uid).get("current_streak", 0) or 0)
-            except Exception:
+            except Exception as exc:
+                logger.warning("get_team_streaks: calculate_streak failed for uid=%s: %s", uid, exc)
                 out[uid] = 0
     return out

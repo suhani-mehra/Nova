@@ -26,6 +26,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _schedule_job(loop, module_path: str, fn_name: str, label: str) -> None:
+    """Fire-and-forget: import `fn_name` from `module_path` and dispatch it to
+    the executor. Shared shape for the startup pre-warm jobs in lifespan()
+    (previously ~10 near-identical try/import/schedule/except-log blocks).
+    Logs (tagged with `label`) if either the import or the scheduling itself
+    fails, matching each job's original independent try/except."""
+    try:
+        import importlib
+        fn = getattr(importlib.import_module(module_path), fn_name)
+        loop.run_in_executor(None, fn)
+    except Exception as exc:
+        logger.warning("Could not schedule %s job: %s", label, exc)
+
+
 def _ensure_warehouse_ready():
     """
     Runs in a thread — the first-ever sync pulls ~570k rows from the API and
@@ -43,10 +57,9 @@ def _ensure_warehouse_ready():
     sync_all()
 
 
-# ── Lifespan: ensure the warehouse is ready on startup ───────────────────────
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+def _init_startup_tables() -> None:
+    """One-time schema/table initialization for every SQLite-backed cache the
+    app uses, run once at the start of lifespan() before anything else."""
     init_congrats_db()
     from nova_db.gpt_cache import init_cache, clear_expired
     init_cache()
@@ -54,192 +67,183 @@ async def lifespan(app: FastAPI):
     logger.info("GPT cache initialised")
     from nova_db.course_scores import init_course_scores_table
     init_course_scores_table()
-    from nova_db.tier_scores import init_tier_scores_table, refresh_tier_scores_cache
+    from nova_db.tier_scores import init_tier_scores_table
     init_tier_scores_table()
     from nova_db.badges import init_badges_table
     init_badges_table()
     from nova_db.user_settings import init_user_settings_table
     init_user_settings_table()
+
+
+def _schedule_prewarm_jobs(loop) -> None:
+    """Fire-and-forget schedule every startup cache pre-warm / compute job onto
+    the executor. Each job's own try/except (via _schedule_job, or inline for
+    the staggered/grouped jobs below) means a single job failing never blocks
+    or fails the others."""
+    try:
+        from routers.manager import _prewarm_classify_cache, _prewarm_streak_cache
+        import time as _time
+
+        def _staggered_prewarms():
+            # Stagger so pre-warm jobs don't all hit Fabric simultaneously
+            # alongside the other startup jobs (score_all_courses, ai_trend, etc.)
+            _time.sleep(10)
+            _prewarm_classify_cache()
+            _time.sleep(5)
+            _prewarm_streak_cache()
+
+        loop.run_in_executor(None, _staggered_prewarms)
+    except Exception as exc:
+        logger.warning("Could not schedule cache pre-warms: %s", exc)
+    _schedule_job(loop, "services.course_scoring_service", "score_all_courses", "course scoring")
+    _schedule_job(loop, "routers.manager", "_compute_quarterly_ai_proficiency", "AI trend")
+    _schedule_job(loop, "routers.manager", "_compute_manager_team_snapshot", "team leaderboard snapshot")
+    _schedule_job(loop, "routers.manager", "_compute_ai_proficiency_by_region", "AI proficiency-by-region")
+    _schedule_job(loop, "routers.manager", "_compute_proficiency_by_vertical", "proficiency-by-vertical")
+    _schedule_job(loop, "routers.manager", "_compute_specialization_landscape", "specialization-landscape")
+    _schedule_job(loop, "routers.manager", "_compute_team_quadrant", "team-quadrant")
+    try:
+        # Pre-warm the expensive company-wide overview stats so the manager
+        # overview page never blocks on a full company scan after a restart.
+        from routers.manager import (
+            _compute_company_overview_stats,
+            _compute_company_retention,
+            _compute_company_at_risk_count,
+        )
+        loop.run_in_executor(None, _compute_company_overview_stats)
+        loop.run_in_executor(None, _compute_company_retention)
+        loop.run_in_executor(None, _compute_company_at_risk_count)
+    except Exception as exc:
+        logger.warning("Could not schedule company overview stats warm-up: %s", exc)
+    try:
+        from nova_db.tier_scores import refresh_tier_scores_cache
+        loop.run_in_executor(None, refresh_tier_scores_cache)
+    except Exception as exc:
+        logger.warning("Could not schedule tier score refresh: %s", exc)
+
+
+def _run_nightly_refresh() -> None:
+    """
+    Runs at 3 AM nightly (after the lakehouse ETL updates 12-2 AM).
+    First re-syncs the local warehouse from the Classmate API, then
+    refreshes all caches so they reflect the new day's data.
+    Per-manager caches (people_list_*, direct_reports_*) are cleared
+    so they rebuild fresh on first access rather than pre-warmed.
+    """
+    import time as _time
+    from nova_db.gpt_cache import clear_by_prefix
+    from nova_db.tier_scores import refresh_tier_scores_cache
+
+    logger.info("Nightly cache refresh starting")
+
+    # Pull fresh data from the API before any cache recomputation —
+    # everything below reads the warehouse.
+    try:
+        from nova_db.warehouse_sync import sync_all
+        sync_all()
+    except Exception as exc:
+        logger.error("Nightly warehouse sync failed (caches will rebuild "
+                     "from the previous snapshot): %s", exc)
+
+    # Month rollover: on the 1st (with a day<=3 backfill for a missed run),
+    # award each employee the tier they ended the just-completed month with,
+    # BEFORE the refresh below resets the live tier to the new month.
+    try:
+        from services.tier_service import award_monthly_badges
+        from nova_db.badges import badges_exist_for
+        today = datetime.now(timezone.utc).date()
+        prior = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+        prior_str = prior.strftime("%Y-%m")
+        if today.day == 1 or (today.day <= 3 and not badges_exist_for(prior_str)):
+            logger.info("Month rollover: awarding badges for %s", prior_str)
+            award_monthly_badges(prior, awarded_at=today.isoformat())
+    except Exception as exc:
+        logger.warning("Nightly monthly badge award failed: %s", exc)
+
+    try:
+        refresh_tier_scores_cache(force=True)
+    except Exception as exc:
+        logger.warning("Nightly tier score refresh failed: %s", exc)
+
+    _time.sleep(5)
+    try:
+        from routers.manager import _prewarm_classify_cache
+        _prewarm_classify_cache()
+    except Exception as exc:
+        logger.warning("Nightly classify pre-warm failed: %s", exc)
+
+    _time.sleep(5)
+    try:
+        from routers.manager import _prewarm_streak_cache
+        _prewarm_streak_cache()
+    except Exception as exc:
+        logger.warning("Nightly streak pre-warm failed: %s", exc)
+
+    _time.sleep(5)
+    try:
+        from routers.manager import (
+            _compute_company_overview_stats,
+            _compute_company_retention,
+            _compute_company_at_risk_count,
+            _compute_quarterly_ai_proficiency,
+            _compute_manager_team_snapshot,
+            _compute_ai_proficiency_by_region,
+            _compute_proficiency_by_vertical,
+            _compute_specialization_landscape,
+            _compute_team_quadrant,
+        )
+        _compute_company_overview_stats()
+        _compute_company_retention()
+        _compute_company_at_risk_count()
+        _compute_quarterly_ai_proficiency()
+        _compute_manager_team_snapshot()
+        _compute_ai_proficiency_by_region()
+        _compute_proficiency_by_vertical()
+        _compute_specialization_landscape()
+        _compute_team_quadrant()
+    except Exception as exc:
+        logger.warning("Nightly company stats refresh failed: %s", exc)
+
+    # Clear stale per-manager caches then pre-warm all managers
+    clear_by_prefix("people_list_")
+    clear_by_prefix("direct_reports_")
+    try:
+        from routers.manager import _prewarm_manager_people_cache
+        _prewarm_manager_people_cache()
+    except Exception as exc:
+        logger.warning("Nightly manager people pre-warm failed: %s", exc)
+    logger.info("Nightly cache refresh complete")
+
+
+async def _nightly_refresh_loop(loop) -> None:
+    """Sleeps until the next 3 AM UTC, dispatches _run_nightly_refresh to the
+    executor, then repeats forever. `loop` is passed explicitly (rather than
+    re-fetched via asyncio.get_event_loop()) so it's always the same loop
+    instance lifespan() started with."""
+    while True:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
+        if now >= next_run:
+            next_run += timedelta(days=1)
+        await asyncio.sleep((next_run - now).total_seconds())
+        try:
+            loop.run_in_executor(None, _run_nightly_refresh)
+        except Exception as exc:
+            logger.warning("Nightly cache refresh failed to schedule: %s", exc)
+
+
+# ── Lifespan: ensure the warehouse is ready on startup ───────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _init_startup_tables()
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, _ensure_warehouse_ready)
         logger.info("Warehouse OK")
         print("\n✓ Warehouse OK\n")
-        try:
-            from routers.manager import (
-                _prewarm_classify_cache,
-                _prewarm_streak_cache,
-            )
-            import time as _time
-
-            def _staggered_prewarms():
-                # Stagger so pre-warm jobs don't all hit Fabric simultaneously
-                # alongside the other startup jobs (score_all_courses, ai_trend, etc.)
-                _time.sleep(10)
-                _prewarm_classify_cache()
-                _time.sleep(5)
-                _prewarm_streak_cache()
-
-            loop.run_in_executor(None, _staggered_prewarms)
-        except Exception as exc:
-            logger.warning("Could not schedule cache pre-warms: %s", exc)
-        try:
-            from services.course_scoring_service import score_all_courses
-            loop.run_in_executor(None, score_all_courses)
-        except Exception as exc:
-            logger.warning("Could not schedule course scoring job: %s", exc)
-        try:
-            from routers.manager import _compute_quarterly_ai_proficiency
-            loop.run_in_executor(None, _compute_quarterly_ai_proficiency)
-        except Exception as exc:
-            logger.warning("Could not schedule AI trend job: %s", exc)
-        try:
-            from routers.manager import _compute_manager_team_snapshot
-            loop.run_in_executor(None, _compute_manager_team_snapshot)
-        except Exception as exc:
-            logger.warning("Could not schedule team leaderboard snapshot job: %s", exc)
-        try:
-            from routers.manager import _compute_ai_proficiency_by_region
-            loop.run_in_executor(None, _compute_ai_proficiency_by_region)
-        except Exception as exc:
-            logger.warning("Could not schedule AI proficiency-by-region job: %s", exc)
-        try:
-            from routers.manager import _compute_proficiency_by_vertical
-            loop.run_in_executor(None, _compute_proficiency_by_vertical)
-        except Exception as exc:
-            logger.warning("Could not schedule proficiency-by-vertical job: %s", exc)
-        try:
-            from routers.manager import _compute_specialization_landscape
-            loop.run_in_executor(None, _compute_specialization_landscape)
-        except Exception as exc:
-            logger.warning("Could not schedule specialization-landscape job: %s", exc)
-        try:
-            from routers.manager import _compute_team_quadrant
-            loop.run_in_executor(None, _compute_team_quadrant)
-        except Exception as exc:
-            logger.warning("Could not schedule team-quadrant job: %s", exc)
-        try:
-            # Pre-warm the expensive company-wide overview stats so the manager
-            # overview page never blocks on a full company scan after a restart.
-            from routers.manager import (
-                _compute_company_overview_stats,
-                _compute_company_retention,
-                _compute_company_at_risk_count,
-            )
-            loop.run_in_executor(None, _compute_company_overview_stats)
-            loop.run_in_executor(None, _compute_company_retention)
-            loop.run_in_executor(None, _compute_company_at_risk_count)
-        except Exception as exc:
-            logger.warning("Could not schedule company overview stats warm-up: %s", exc)
-        try:
-            loop.run_in_executor(None, refresh_tier_scores_cache)
-        except Exception as exc:
-            logger.warning("Could not schedule tier score refresh: %s", exc)
-
-        def _run_nightly_refresh():
-            """
-            Runs at 3 AM nightly (after the lakehouse ETL updates 12-2 AM).
-            First re-syncs the local warehouse from the Classmate API, then
-            refreshes all caches so they reflect the new day's data.
-            Per-manager caches (people_list_*, direct_reports_*) are cleared
-            so they rebuild fresh on first access rather than pre-warmed.
-            """
-            import time as _time
-            from nova_db.gpt_cache import clear_by_prefix
-
-            logger.info("Nightly cache refresh starting")
-
-            # Pull fresh data from the API before any cache recomputation —
-            # everything below reads the warehouse.
-            try:
-                from nova_db.warehouse_sync import sync_all
-                sync_all()
-            except Exception as exc:
-                logger.error("Nightly warehouse sync failed (caches will rebuild "
-                             "from the previous snapshot): %s", exc)
-
-            # Month rollover: on the 1st (with a day<=3 backfill for a missed run),
-            # award each employee the tier they ended the just-completed month with,
-            # BEFORE the refresh below resets the live tier to the new month.
-            try:
-                from services.tier_service import award_monthly_badges
-                from nova_db.badges import badges_exist_for
-                today = datetime.now(timezone.utc).date()
-                prior = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
-                prior_str = prior.strftime("%Y-%m")
-                if today.day == 1 or (today.day <= 3 and not badges_exist_for(prior_str)):
-                    logger.info("Month rollover: awarding badges for %s", prior_str)
-                    award_monthly_badges(prior, awarded_at=today.isoformat())
-            except Exception as exc:
-                logger.warning("Nightly monthly badge award failed: %s", exc)
-
-            try:
-                refresh_tier_scores_cache(force=True)
-            except Exception as exc:
-                logger.warning("Nightly tier score refresh failed: %s", exc)
-
-            _time.sleep(5)
-            try:
-                from routers.manager import _prewarm_classify_cache
-                _prewarm_classify_cache()
-            except Exception as exc:
-                logger.warning("Nightly classify pre-warm failed: %s", exc)
-
-            _time.sleep(5)
-            try:
-                from routers.manager import _prewarm_streak_cache
-                _prewarm_streak_cache()
-            except Exception as exc:
-                logger.warning("Nightly streak pre-warm failed: %s", exc)
-
-            _time.sleep(5)
-            try:
-                from routers.manager import (
-                    _compute_company_overview_stats,
-                    _compute_company_retention,
-                    _compute_company_at_risk_count,
-                    _compute_quarterly_ai_proficiency,
-                    _compute_manager_team_snapshot,
-                    _compute_ai_proficiency_by_region,
-                    _compute_proficiency_by_vertical,
-                    _compute_specialization_landscape,
-                    _compute_team_quadrant,
-                )
-                _compute_company_overview_stats()
-                _compute_company_retention()
-                _compute_company_at_risk_count()
-                _compute_quarterly_ai_proficiency()
-                _compute_manager_team_snapshot()
-                _compute_ai_proficiency_by_region()
-                _compute_proficiency_by_vertical()
-                _compute_specialization_landscape()
-                _compute_team_quadrant()
-            except Exception as exc:
-                logger.warning("Nightly company stats refresh failed: %s", exc)
-
-            # Clear stale per-manager caches then pre-warm all managers
-            clear_by_prefix("people_list_")
-            clear_by_prefix("direct_reports_")
-            try:
-                from routers.manager import _prewarm_manager_people_cache
-                _prewarm_manager_people_cache()
-            except Exception as exc:
-                logger.warning("Nightly manager people pre-warm failed: %s", exc)
-            logger.info("Nightly cache refresh complete")
-
-        async def _nightly_refresh_loop():
-            while True:
-                now = datetime.now(timezone.utc).replace(tzinfo=None)
-                next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
-                if now >= next_run:
-                    next_run += timedelta(days=1)
-                await asyncio.sleep((next_run - now).total_seconds())
-                try:
-                    loop.run_in_executor(None, _run_nightly_refresh)
-                except Exception as exc:
-                    logger.warning("Nightly cache refresh failed to schedule: %s", exc)
-
-        asyncio.ensure_future(_nightly_refresh_loop())
+        _schedule_prewarm_jobs(loop)
+        asyncio.ensure_future(_nightly_refresh_loop(loop))
     except Exception as exc:
         logger.error("Warehouse init FAILED on startup: %s", exc)
         print(f"\n✗ Warehouse init FAILED: {exc}\n")
@@ -301,6 +305,25 @@ async def admin_sync(user: CurrentUser = Depends(get_current_user)):
     return {"ok": True, "tables": counts}
 
 
+def _build_me_response(user_id, name, email, role, is_exec_manager, color_mode,
+                        department_code, designation_code, employee_id, manager_id) -> dict:
+    """Shared shape for /api/me's three response branches (no identity yet,
+    profile found, profile lookup failed/empty) — same 10 keys, different
+    sources."""
+    return {
+        "user_id":          user_id,
+        "name":             name,
+        "email":            email,
+        "role":             role,
+        "is_exec_manager":  is_exec_manager,
+        "color_mode":       color_mode,
+        "department_code":  department_code,
+        "designation_code": designation_code,
+        "employee_id":      employee_id,
+        "manager_id":       manager_id,
+    }
+
+
 @app.get("/api/me")
 def me(user: CurrentUser = Depends(get_current_user)):
     """
@@ -315,18 +338,9 @@ def me(user: CurrentUser = Depends(get_current_user)):
 
     if user.classmate_user_id is None:
         # Production path before Classmate user lookup is wired
-        return {
-            "user_id":          None,
-            "name":             user.name,
-            "email":            user.email,
-            "role":             user.role,
-            "is_exec_manager":  is_exec_manager,
-            "color_mode":       color_mode,
-            "department_code":  None,
-            "designation_code": None,
-            "employee_id":      None,
-            "manager_id":       None,
-        }
+        return _build_me_response(
+            None, user.name, user.email, user.role, is_exec_manager, color_mode,
+            None, None, None, None)
 
     try:
         rows = get_employee_profile(None, user.classmate_user_id)
@@ -336,32 +350,14 @@ def me(user: CurrentUser = Depends(get_current_user)):
 
     if rows:
         p = rows[0]
-        return {
-            "user_id":          p["user_id"],
-            "name":             p["name"],
-            "email":            p["email_id"],
-            "role":             user.role,
-            "is_exec_manager":  is_exec_manager,
-            "color_mode":       color_mode,
-            "department_code":  p["department"],
-            "designation_code": p["designation"],
-            "employee_id":      p["employee_id"],
-            "manager_id":       p["manager_user_id"],
-        }
+        return _build_me_response(
+            p["user_id"], p["name"], p["email_id"], user.role, is_exec_manager, color_mode,
+            p["department"], p["designation"], p["employee_id"], p["manager_user_id"])
 
     # Fabric unreachable or profile not found — return identity from auth layer
-    return {
-        "user_id":          user.classmate_user_id,
-        "name":             user.name,
-        "email":            user.email,
-        "role":             user.role,
-        "is_exec_manager":  is_exec_manager,
-        "color_mode":       color_mode,
-        "department_code":  None,
-        "designation_code": None,
-        "employee_id":      None,
-        "manager_id":       None,
-    }
+    return _build_me_response(
+        user.classmate_user_id, user.name, user.email, user.role, is_exec_manager, color_mode,
+        None, None, None, None)
 
 
 @app.post("/api/me/color-mode")

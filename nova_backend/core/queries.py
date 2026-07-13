@@ -39,6 +39,17 @@ _DEDUP_CTE = """
 """
 
 
+def _title_case_fields(rows: list[dict], fields=("name", "department", "designation")) -> list[dict]:
+    """Title-cases the given fields in place on each row (mutates and returns
+    `rows`). Fields are normalised LOWER(TRIM()) in SQL, then re-capitalised
+    here in Python before being returned to callers."""
+    for r in rows:
+        for f in fields:
+            if r.get(f):
+                r[f] = r[f].title()
+    return rows
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # IDENTITY / PROFILE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -90,14 +101,7 @@ def get_employee_profile(conn: sqlite3.Connection, user_id: int) -> list[dict]:
           AND  ep.user_id = ?
     """
     rows = query(sql, (user_id,))
-    for r in rows:
-        if r.get("name"):
-            r["name"] = r["name"].title()
-        if r.get("department"):
-            r["department"] = r["department"].title()
-        if r.get("designation"):
-            r["designation"] = r["designation"].title()
-    return rows
+    return _title_case_fields(rows)
 
 
 def get_all_active_employee_regions(conn: sqlite3.Connection) -> list[dict]:
@@ -153,13 +157,7 @@ def get_direct_reports(conn: sqlite3.Connection, manager_user_id: int) -> list[d
         ORDER BY ep.display_name
     """
     rows = query(sql, (manager_user_id,))
-    for r in rows:
-        if r.get("name"):
-            r["name"] = r["name"].title()
-        if r.get("department"):
-            r["department"] = r["department"].title()
-        if r.get("designation"):
-            r["designation"] = r["designation"].title()
+    _title_case_fields(rows)
     set_cache(cache_key, rows, "computed", ttl_hours=25)
     return rows
 

@@ -135,5 +135,6 @@ def get_scored_count() -> int:
                 "SELECT COUNT(*) AS n FROM course_vertical_scores"
             ).fetchone()
             return row["n"] if row else 0
-    except Exception:
+    except Exception as exc:
+        logger.warning("get_scored_count: query failed: %s", exc)
         return 0

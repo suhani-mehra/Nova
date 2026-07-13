@@ -82,7 +82,8 @@ def warehouse_is_ready() -> bool:
                 "SELECT COUNT(*) FROM _sync_meta WHERE row_count > 0"
             ).fetchone()
             return bool(row and row[0] >= len(API_TABLES) - 2)  # tolerate empty edge tables
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        logger.warning("warehouse_is_ready: _sync_meta check failed: %s", exc)
         return False
 
 
@@ -94,11 +95,12 @@ def last_sync_time() -> str | None:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
             row = conn.execute("SELECT MAX(synced_at) FROM _sync_meta").fetchone()
             return row[0] if row else None
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        logger.warning("last_sync_time: _sync_meta lookup failed: %s", exc)
         return None
 
 
-def _qident(name: str) -> str:
+def _quote_identifier(name: str) -> str:
     """Quote an SQL identifier (handles oddities like the `comments'` column)."""
     return '"' + name.replace('"', '""') + '"'
 
@@ -108,7 +110,7 @@ def _load_table(conn: sqlite3.Connection, table_name: str) -> int:
 
     table_name always comes from the hardcoded API_TABLES list (never request
     input); column names come from the API response and are quoted via
-    _qident() before being interpolated into DDL/DML, so the f-strings below
+    _quote_identifier() before being interpolated into DDL/DML, so the f-strings below
     are safe by construction, not string-built from untrusted values.
     """
     total = 0
@@ -118,18 +120,18 @@ def _load_table(conn: sqlite3.Connection, table_name: str) -> int:
             continue
         if columns is None:
             columns = list(page[0].keys())
-            col_defs = ", ".join(_qident(c) for c in columns)
-            conn.execute(f"DROP TABLE IF EXISTS {_qident(table_name)}")
-            conn.execute(f"CREATE TABLE {_qident(table_name)} ({col_defs})")
+            col_defs = ", ".join(_quote_identifier(c) for c in columns)
+            conn.execute(f"DROP TABLE IF EXISTS {_quote_identifier(table_name)}")
+            conn.execute(f"CREATE TABLE {_quote_identifier(table_name)} ({col_defs})")
         placeholders = ", ".join("?" for _ in columns)
-        sql = f"INSERT INTO {_qident(table_name)} VALUES ({placeholders})"
+        sql = f"INSERT INTO {_quote_identifier(table_name)} VALUES ({placeholders})"
         conn.executemany(sql, [tuple(row.get(c) for c in columns) for row in page])
         total += len(page)
     if columns is None:
         # Empty table — create it with no rows so queries don't crash.
         logger.warning("API table %s returned no rows", table_name)
-        conn.execute(f"DROP TABLE IF EXISTS {_qident(table_name)}")
-        conn.execute(f"CREATE TABLE {_qident(table_name)} (id)")
+        conn.execute(f"DROP TABLE IF EXISTS {_quote_identifier(table_name)}")
+        conn.execute(f"CREATE TABLE {_quote_identifier(table_name)} (id)")
     conn.commit()
     return total
 
@@ -218,8 +220,8 @@ def _build_derived(conn: sqlite3.Connection) -> None:
 def _create_indexes(conn: sqlite3.Connection) -> None:
     for table, col in _INDEXES:
         conn.execute(
-            f"CREATE INDEX IF NOT EXISTS {_qident(f'idx_{table}_{col}')} "
-            f"ON {_qident(table)} ({_qident(col)})"
+            f"CREATE INDEX IF NOT EXISTS {_quote_identifier(f'idx_{table}_{col}')} "
+            f"ON {_quote_identifier(table)} ({_quote_identifier(col)})"
         )
     conn.commit()
 

@@ -37,8 +37,14 @@
     ],
   };
 
+  // Exec dev/sign-in IDs allowed to use the "view as" impersonation panel —
+  // single source of truth, shared by app.jsx and SignInPage.jsx (previously
+  // each kept its own separately-declared copy of this same set).
+  const DEV_USER_IDS = new Set([16467, 16465, 16470]);
+
   window.NOVA = {
     TIERS,
+    DEV_USER_IDS,
     managerStatic: MANAGER_STATIC,
     accounts: {
       employee: null,

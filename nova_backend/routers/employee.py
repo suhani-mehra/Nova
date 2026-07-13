@@ -65,19 +65,20 @@ def _get_team_congrats_week(manager_id: int) -> int:
         conn.row_factory = sqlite3.Row
         # Placeholder count for IN(...), not a value — each id is still bound
         # through the parameterised '?' slots below, never concatenated.
-        ph = ",".join("?" * len(uids))
+        placeholders = ",".join("?" * len(uids))
         row = conn.execute(
             f"""
             SELECT COUNT(*) AS cnt
             FROM   congrats
             WHERE  created_at >= datetime('now', '-7 days')
-              AND  (sender_user_id IN ({ph}) OR receiver_user_id IN ({ph}))
+              AND  (sender_user_id IN ({placeholders}) OR receiver_user_id IN ({placeholders}))
             """,
             uids * 2,
         ).fetchone()
         conn.close()
         return int(row["cnt"]) if row else 0
-    except Exception:
+    except Exception as exc:
+        logger.warning("_get_team_congrats_week: query failed for manager_id=%s: %s", manager_id, exc)
         return 0
 
 
@@ -90,8 +91,8 @@ _TRAINING_KEYWORDS = [
 
 
 def _is_training_module_by_name(name: str) -> bool:
-    nl = name.lower()
-    return any(kw in nl for kw in _TRAINING_KEYWORDS)
+    name_lower = name.lower()
+    return any(kw in name_lower for kw in _TRAINING_KEYWORDS)
 
 
 def _filter_training_modules(courses: list) -> list:
@@ -109,15 +110,15 @@ def _filter_training_modules(courses: list) -> list:
         conn.row_factory = sqlite3.Row
         # Placeholder count for IN(...), not a value — each name is still bound
         # through the parameterised '?' slots below, never concatenated.
-        ph = ",".join("?" * len(names))
+        placeholders = ",".join("?" * len(names))
         rows = conn.execute(
-            f"SELECT item_name, ai, cloud, frontend, backend, data FROM course_vertical_scores WHERE item_name IN ({ph})",
+            f"SELECT item_name, ai, cloud, frontend, backend, data FROM course_vertical_scores WHERE item_name IN ({placeholders})",
             names,
         ).fetchall()
         conn.close()
         scores_by_name = {r["item_name"]: r for r in rows}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("_filter_training_modules: course_vertical_scores lookup failed: %s", exc)
 
     from services.skill_service import _classify
     result = []
@@ -236,6 +237,102 @@ def _get_team_reco_courses(manager_id: int, uid: int) -> list:
     ]
 
 
+def _course_name_tiebreak(name: str) -> float:
+    """Small, stable per-course nudge (0–10 raw points) so courses that share an
+    identical vertical vector + completion count (common when a course isn't
+    individually GPT-graded and the keyword fallback assigns every same-category
+    course the same vector — for such courses there's genuinely no signal to rank
+    them by, so a deterministic nudge is a fair tiebreak) don't collapse to one
+    identical %. Derived from the name, not random, so order is stable run to run."""
+    import zlib
+    return (zlib.crc32((name or "").encode("utf-8", errors="replace")) % 1000) / 1000.0 * 10.0
+
+
+def _get_course_vertical_vectors(courses: list) -> list:
+    """5-axis vertical score vector per course, aligned index-for-index with
+    `courses`. Pulls pre-graded scores from course_vertical_scores in one
+    batched (deduped) lookup, falling back to the keyword scorer for any
+    course not graded yet — the same fallback the grading pipeline uses."""
+    from services.skill_service import _keyword_scores, AXES
+    from nova_db.course_scores import get_scores_for_items
+
+    pairs = [("course", int(c["cat_id"])) for c in courses if c.get("cat_id")]
+    score_map = get_scores_for_items(list(set(pairs)))
+
+    vectors = []
+    for c in courses:
+        cid = c.get("cat_id")
+        sc = score_map.get(("course", int(cid))) if cid else None
+        if sc is None:
+            sc = _keyword_scores(c["course_name"] or "")
+        vectors.append([float(sc.get(ax, 0)) for ax in AXES])
+    return vectors
+
+
+def _compute_user_skill_profile(uid: int) -> tuple:
+    """(profile, gap_w) — the user's accumulated 5-axis vertical profile and
+    the per-axis weighting toward their currently-weakest axes. Falls back to
+    an all-zero profile on any skill-radar failure."""
+    from services.skill_service import AXES
+
+    try:
+        radar = calculate_skill_radar(uid)
+        this_month = radar.get("this_month", [0] * len(AXES))
+        raw = radar.get("_raw_scores", {})
+        profile = [float(raw.get(ax, 0)) for ax in AXES]
+    except Exception as exc:
+        logger.warning("_score_reco_matches: skill radar failed for uid=%s: %s", uid, exc)
+        this_month = [0] * len(AXES)
+        profile = [0.0] * len(AXES)
+
+    gaps = [max(0.0, 100.0 - float(this_month[i])) for i in range(len(AXES))]
+    gap_total = sum(gaps) or 1.0
+    gap_w = [g / gap_total for g in gaps]
+    return profile, gap_w
+
+
+def _blend_match_scores(courses: list, vectors: list, profile: list, gap_w: list) -> list:
+    """Blends teammate popularity, skill-gap fill, and profile similarity into
+    one raw score per course, aligned index-for-index with `courses`."""
+    import math
+    from services.skill_service import AXES
+
+    prof_norm = math.sqrt(sum(v * v for v in profile))
+    max_completions = max((c.get("completion_count", 0) for c in courses), default=0) or 1
+
+    raw_scores = []
+    for c, v in zip(courses, vectors):
+        teammate = 100.0 * (c.get("completion_count", 0) / max_completions)
+        skill_gap = sum(v[i] * gap_w[i] for i in range(len(AXES)))
+        v_norm = math.sqrt(sum(x * x for x in v))
+        if prof_norm > 0 and v_norm > 0:
+            cos = sum(v[i] * profile[i] for i in range(len(AXES))) / (prof_norm * v_norm)
+            similarity = max(0.0, cos) * 100.0
+        else:
+            similarity = 0.0
+        # skill_gap and similarity are structurally opposed (one rewards weak axes,
+        # the other rewards strong ones), so take the better of the two rather than
+        # averaging them into a permanently middling score.
+        relevance = max(skill_gap, similarity)
+        raw_scores.append(0.4 * teammate + 0.6 * relevance + _course_name_tiebreak(c.get("course_name", "")))
+    return raw_scores
+
+
+def _rescale_to_display_band(raw_scores: list) -> list:
+    """Stretches raw blended scores (which cluster tightly within a candidate
+    set) into a wider, more legible display band (70–98%) instead of showing
+    uniformly low numbers."""
+    lo, hi = min(raw_scores), max(raw_scores)
+    match_pcts = []
+    for raw in raw_scores:
+        if hi - lo < 1e-9:
+            match = 84.0  # band midpoint — only when every candidate ties exactly
+        else:
+            match = 70.0 + (raw - lo) / (hi - lo) * 28.0
+        match_pcts.append(max(0, min(100, round(match))))
+    return match_pcts
+
+
 def _score_reco_matches(courses: list, uid: int) -> list:
     """Assign each candidate course a real 0-100 ``match_pct`` using data that has
     already been computed — no live LLM call.
@@ -253,75 +350,16 @@ def _score_reco_matches(courses: list, uid: int) -> list:
     """
     if not courses:
         return courses
-    import math
-    import zlib
-    from services.skill_service import _keyword_scores, AXES
-    from nova_db.course_scores import get_scores_for_items
 
-    def _tiebreak(name: str) -> float:
-        # Small, stable per-course nudge (0–10 raw points) so courses that share an
-        # identical vertical vector + completion count (common when a course isn't
-        # individually GPT-graded and the keyword fallback assigns every same-category
-        # course the same vector — for such courses there's genuinely no signal to rank
-        # them by, so a deterministic nudge is a fair tiebreak) don't collapse to one
-        # identical %. Derived from the name, not random, so order is stable run to run.
-        return (zlib.crc32((name or "").encode("utf-8", errors="replace")) % 1000) / 1000.0 * 10.0
+    vectors = _get_course_vertical_vectors(courses)
+    profile, gap_w = _compute_user_skill_profile(uid)
+    raw_scores = _blend_match_scores(courses, vectors, profile, gap_w)
+    match_pcts = _rescale_to_display_band(raw_scores)
 
-    pairs = [("course", int(c["cat_id"])) for c in courses if c.get("cat_id")]
-    score_map = get_scores_for_items(list(set(pairs)))
-
-    def _vec(c: dict) -> list:
-        cid = c.get("cat_id")
-        sc = score_map.get(("course", int(cid))) if cid else None
-        if sc is None:
-            sc = _keyword_scores(c["course_name"] or "")
-        return [float(sc.get(ax, 0)) for ax in AXES]
-
-    # User skill profile + per-axis gaps from the radar
-    try:
-        radar = calculate_skill_radar(uid)
-        this_month = radar.get("this_month", [0] * len(AXES))
-        raw = radar.get("_raw_scores", {})
-        profile = [float(raw.get(ax, 0)) for ax in AXES]
-    except Exception:
-        this_month = [0] * len(AXES)
-        profile = [0.0] * len(AXES)
-
-    gaps = [max(0.0, 100.0 - float(this_month[i])) for i in range(len(AXES))]
-    gap_total = sum(gaps) or 1.0
-    gap_w = [g / gap_total for g in gaps]
-
-    prof_norm = math.sqrt(sum(v * v for v in profile))
-    max_completions = max((c.get("completion_count", 0) for c in courses), default=0) or 1
-
-    raw_scores = []
-    for c in courses:
-        v = _vec(c)
-        teammate = 100.0 * (c.get("completion_count", 0) / max_completions)
-        skill_gap = sum(v[i] * gap_w[i] for i in range(len(AXES)))
-        v_norm = math.sqrt(sum(x * x for x in v))
-        if prof_norm > 0 and v_norm > 0:
-            cos = sum(v[i] * profile[i] for i in range(len(AXES))) / (prof_norm * v_norm)
-            similarity = max(0.0, cos) * 100.0
-        else:
-            similarity = 0.0
-        # skill_gap and similarity are structurally opposed (one rewards weak axes,
-        # the other rewards strong ones), so take the better of the two rather than
-        # averaging them into a permanently middling score.
-        relevance = max(skill_gap, similarity)
-        raw_scores.append(0.4 * teammate + 0.6 * relevance + _tiebreak(c.get("course_name", "")))
-
-    # Raw blended scores cluster tightly within a candidate set — stretch them into
-    # a wider, more legible display band (70–98%) instead of showing uniformly low
-    # numbers. Scoring the full candidate pool (not a pre-sliced top 4) gives enough
-    # spread that the exact-tie fallback rarely fires.
-    lo, hi = min(raw_scores), max(raw_scores)
-    for c, raw in zip(courses, raw_scores):
-        if hi - lo < 1e-9:
-            match = 84.0  # band midpoint — only when every candidate ties exactly
-        else:
-            match = 70.0 + (raw - lo) / (hi - lo) * 28.0
-        c["match_pct"] = max(0, min(100, round(match)))
+    # Single mutation point — the extracted helpers above only ever return new
+    # parallel lists, never write back into `courses` themselves.
+    for c, m in zip(courses, match_pcts):
+        c["match_pct"] = m
     return courses
 
 
@@ -454,6 +492,72 @@ async def employee_dashboard(user: CurrentUser = Depends(get_current_user)):
     }
 
 
+async def _gather_team_data(manager_id: int, uid: int) -> dict:
+    """The 6 parallel data fetches for /employee/team, gathered together."""
+    accomplishments, top_courses, reco_courses, highlights, completions_delta, congrats_count = await asyncio.gather(
+        _run(get_team_accomplishments, manager_id, 14, uid),
+        _run(_get_team_top_courses, manager_id, uid),
+        _run(_get_team_reco_courses, manager_id, uid),
+        _run(get_team_highlights, manager_id),
+        _run(_get_team_completions_delta, manager_id, uid),
+        _run(_get_team_congrats_week, manager_id),
+    )
+    return {
+        "accomplishments": accomplishments,
+        "top_courses": top_courses,
+        "reco_courses": reco_courses,
+        "highlights": highlights,
+        "completions_delta": completions_delta,
+        "congrats_count": congrats_count,
+    }
+
+
+def _select_top_course_name(top_courses: list, reco_courses: list) -> tuple:
+    """(top_course_name, filtered_reco) — filters training modules out of
+    both lists and picks the highlights-banner course name."""
+    # Most completed non-training course for the highlights banner
+    filtered_top = _filter_training_modules(top_courses)
+    top_course_name = filtered_top[0]["course_name"] if filtered_top else None
+
+    # Recommendations: team courses user hasn't done, training modules filtered out
+    filtered_reco = _filter_training_modules(reco_courses)
+    if not top_course_name and filtered_reco:
+        top_course_name = filtered_reco[0]["course_name"]
+
+    return top_course_name, filtered_reco
+
+
+def _dedup_match_percentages(sorted_courses: list) -> list:
+    """Guarantee strictly-descending distinct match_pct values on an
+    already-sorted-descending course list — a cheap belt-and-suspenders on
+    top of _score_reco_matches's own tiebreak, so two cards never display
+    the same number."""
+    prev = None
+    for c in sorted_courses:
+        if prev is not None and c["match_pct"] >= prev:
+            c["match_pct"] = max(0, prev - 1)
+        prev = c["match_pct"]
+    return sorted_courses
+
+
+async def _choose_popular_courses(filtered_reco: list, uid: int) -> tuple:
+    """(popular_courses, popular_source) — scores+sorts+slices the team's
+    non-training recommendation pool to the top 4, or falls back to visible
+    courses biased to the user's own learning when the team has nothing to
+    recommend yet. Score the FULL filtered pool (not a pre-sliced top 4),
+    then take the 4 best matches — a larger pool spreads scores out and shows
+    the most relevant courses rather than just the most teammate-popular ones."""
+    if filtered_reco:
+        scored = await _run(_score_reco_matches, filtered_reco, uid)
+        popular_courses = sorted(scored, key=lambda c: c["match_pct"], reverse=True)[:4]
+        popular_courses = _dedup_match_percentages(popular_courses)
+        popular_source = "team"
+    else:
+        popular_courses = await _run(_get_fallback_reco_courses, uid)
+        popular_source = "fallback"
+    return popular_courses, popular_source
+
+
 @router.get("/employee/team")
 async def employee_team(user: CurrentUser = Depends(get_current_user)):
     if user.classmate_user_id is None:
@@ -469,56 +573,22 @@ async def employee_team(user: CurrentUser = Depends(get_current_user)):
             return {"accomplishments": [], "popular_courses": fallback,
                     "popular_source": "fallback", "highlights": {}}
 
-        accomplishments, top_courses, reco_courses, highlights, completions_delta, congrats_count = await asyncio.gather(
-            _run(get_team_accomplishments, manager_id, 14, uid),
-            _run(_get_team_top_courses, manager_id, uid),
-            _run(_get_team_reco_courses, manager_id, uid),
-            _run(get_team_highlights, manager_id),
-            _run(_get_team_completions_delta, manager_id, uid),
-            _run(_get_team_congrats_week, manager_id),
-        )
+        data = await _gather_team_data(manager_id, uid)
     except Exception as exc:
         logger.warning("Warehouse unavailable for team uid=%s: %s", uid, exc)
         raise HTTPException(status_code=503, detail="Data unavailable")
 
-    # Most completed non-training course for the highlights banner
-    filtered_top = _filter_training_modules(top_courses)
-    top_course_name = filtered_top[0]["course_name"] if filtered_top else None
+    top_course_name, filtered_reco = _select_top_course_name(data["top_courses"], data["reco_courses"])
+    popular_courses, popular_source = await _choose_popular_courses(filtered_reco, uid)
 
-    # Recommendations: team courses user hasn't done, training modules filtered out, top 4
-    filtered_reco = _filter_training_modules(reco_courses)
-    if not top_course_name and filtered_reco:
-        top_course_name = filtered_reco[0]["course_name"]
-
-    # If the team has nothing to recommend yet, fall back to visible courses biased
-    # to the user's own learning, and tell the frontend to show the waiting message.
-    # Score the FULL filtered pool (not a pre-sliced top 4), then take the 4 best
-    # matches — a larger pool spreads scores out and shows the most relevant courses
-    # rather than just the most teammate-popular ones.
-    if filtered_reco:
-        scored = await _run(_score_reco_matches, filtered_reco, uid)
-        popular_courses = sorted(scored, key=lambda c: c["match_pct"], reverse=True)[:4]
-        # Guarantee the shown cards read as strictly-descending distinct %s — the
-        # tiebreak above spreads genuine ties in most cases, but this is a cheap
-        # belt-and-suspenders so two cards never display the same number.
-        prev = None
-        for c in popular_courses:
-            if prev is not None and c["match_pct"] >= prev:
-                c["match_pct"] = max(0, prev - 1)
-            prev = c["match_pct"]
-        popular_source = "team"
-    else:
-        popular_courses = await _run(_get_fallback_reco_courses, uid)
-        popular_source = "fallback"
-
-    highlights["time_delta_pct"] = completions_delta
+    data["highlights"]["time_delta_pct"] = data["completions_delta"]
     return {
-        "accomplishments":    accomplishments,
+        "accomplishments":    data["accomplishments"],
         "popular_courses":    popular_courses,
         "popular_source":     popular_source,
         "top_course":         top_course_name,
-        "highlights":         highlights,
-        "congrats_this_week": congrats_count,
+        "highlights":         data["highlights"],
+        "congrats_this_week": data["congrats_count"],
     }
 
 

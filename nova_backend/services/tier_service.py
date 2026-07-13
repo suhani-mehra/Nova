@@ -86,6 +86,36 @@ def _tier_progress(percentile: float) -> int:
 _TIER_CACHE_TTL_HOURS = 26
 
 
+def _score_tier_components(completed_credits, recency_credits, active_days,
+                            days_in_month, recency_avg, skill_values) -> dict:
+    """Shared MONTHLY tier-score formula — computes the four normalised
+    components and the weighted composite. Used by both compute_and_cache_tiers
+    (live path) and nova_db.tier_scores._compute_population_scores (population/
+    badge path); must stay identical between the two, or cached tiers would
+    drift from the population they're ranked against.
+
+    tier_score = credits*0.30 + skill*0.35 + consistency*0.20 + recency*0.15
+    """
+    credits_score     = round(min(completed_credits / settings.monthly_credit_target * 100, 100), 1)
+    consistency_score = round(min(active_days / days_in_month * 100, 100), 1)
+    recency_score     = round(min(recency_credits / recency_avg / 3 * 100, 100), 1)
+    skill_score        = round(sum(skill_values) / max(len(skill_values), 1), 1)
+
+    tier_score = (
+        credits_score * 0.30
+        + skill_score * 0.35
+        + consistency_score * 0.20
+        + recency_score * 0.15
+    )
+    return {
+        "credits_score":     credits_score,
+        "consistency_score": consistency_score,
+        "recency_score":     recency_score,
+        "skill_score":       skill_score,
+        "tier_score":        tier_score,
+    }
+
+
 def _global_avg_30d() -> float:
     """Company-wide average 30-day credits — the recency denominator. Written by
     refresh_tier_scores_cache(); falls back to 1.0 when the cache is cold."""
@@ -95,7 +125,8 @@ def _global_avg_30d() -> float:
         try:
             v = float(c["result"].get("avg") or 0.0)
             return v if v > 0 else 1.0
-        except Exception:
+        except Exception as exc:
+            logger.warning("_global_avg_30d: cache value parse failed: %s", exc)
             return 1.0
     return 1.0
 
@@ -116,13 +147,13 @@ def _batch_tier_inputs(uids: list[int], target_month: date | None = None) -> tup
     ph = ",".join("?" * len(uids))
     try:
         rows = query(
-            f"SELECT user_id, COALESCE(SUM(learning_credits),0) AS tc "
+            f"SELECT user_id, COALESCE(SUM(learning_credits),0) AS completed_credits "
             f"FROM vw_classmate_trainings "
             f"WHERE user_id IN ({ph}) AND status=4052 "
             f"  AND completed_on >= ? AND completed_on < ? GROUP BY user_id",
             tuple(uids) + (start, end_excl),
         )
-        credits_map = {int(r["user_id"]): float(r["tc"] or 0) for r in rows}
+        credits_map = {int(r["user_id"]): float(r["completed_credits"] or 0) for r in rows}
     except Exception as exc:
         logger.warning("tier inputs: credits query failed: %s", exc)
     try:
@@ -139,7 +170,7 @@ def _batch_tier_inputs(uids: list[int], target_month: date | None = None) -> tup
     try:
         # Distinct active days WITHIN the target month.
         rows = query(
-            f"""SELECT user_id, COUNT(DISTINCT activity_date) AS ad90
+            f"""SELECT user_id, COUNT(DISTINCT activity_date) AS active_days
             FROM (
                 SELECT user_id, date(credit_date) AS activity_date
                 FROM fact_classmate_learning_credit
@@ -158,11 +189,84 @@ def _batch_tier_inputs(uids: list[int], target_month: date | None = None) -> tup
             GROUP BY user_id""",
             tuple(uids) * 3 + (start, end_excl),
         )
-        active_map = {int(r["user_id"]): int(r["ad90"] or 0) for r in rows}
+        active_map = {int(r["user_id"]): int(r["active_days"] or 0) for r in rows}
     except Exception as exc:
         logger.warning("tier inputs: active-days query failed: %s", exc)
 
     return credits_map, recency_map, active_map
+
+
+def _resolve_ranking_population(population_scores) -> tuple:
+    """(sorted_scores, total_pop) for percentile ranking — fetches the
+    all-population tier scores when the caller doesn't already have them."""
+    from nova_db.tier_scores import get_all_tier_scores
+    if population_scores is None:
+        population_scores = get_all_tier_scores()
+    sorted_scores = sorted(population_scores.values(), reverse=True)
+    return sorted_scores, len(sorted_scores)
+
+
+def _resolve_tier_inputs(uids: list, target_month, inputs, recency_avg) -> tuple:
+    """(credits_map, recency_map, active_map, avg) — uses the caller-supplied
+    `inputs`/`recency_avg` when given (avoids re-querying), else fetches them."""
+    if inputs is not None:
+        credits_map, recency_map, active_map = inputs
+    else:
+        credits_map, recency_map, active_map = _batch_tier_inputs(uids, target_month)
+    # Recency denominator must match the population being ranked. The badge job
+    # passes the prior month's average explicitly; the live path uses the cached
+    # (current-month) average written by refresh_tier_scores_cache.
+    avg = recency_avg if recency_avg is not None else _global_avg_30d()
+    return credits_map, recency_map, active_map, avg
+
+
+def _resolve_skill_norm(uids: list, skill_norm) -> dict:
+    if skill_norm is not None:
+        return skill_norm
+    from services.skill_service import get_team_skill_scores
+    try:
+        return get_team_skill_scores(uids)
+    except Exception as exc:
+        logger.warning("compute_and_cache_tiers: skill scores failed: %s", exc)
+        return {}
+
+
+def _compute_user_tier_score(uid, credits_map, recency_map, active_map, skill_norm,
+                              avg, days_in_month, sorted_scores, total_pop) -> dict:
+    """Full tier result dict for one uid — score components, percentile rank,
+    and tier assignment. Everything compute_and_cache_tiers's per-uid loop
+    needs except the cache write itself."""
+    completed_credits = credits_map.get(uid, 0.0)
+    recency_credits   = recency_map.get(uid, 0.0)
+    active_days       = active_map.get(uid, 0)
+    skill_values = [v for k, v in skill_norm.get(uid, {}).items() if not k.startswith("_")]
+
+    scores = _score_tier_components(
+        completed_credits, recency_credits, active_days, days_in_month, avg, skill_values)
+    tier_score = scores["tier_score"]
+
+    if total_pop > 0:
+        rank = sum(1 for s in sorted_scores if s > tier_score)
+        approx_pct = rank / total_pop * 100
+    else:
+        approx_pct = 50.0
+
+    current_tier, next_tier = _percentile_to_tier(approx_pct)
+    scored_by = skill_norm.get(uid, {}).get("_scored_by", "keywords")
+
+    return {
+        "current_tier":      current_tier,
+        "next_tier":         next_tier,
+        "tier_progress":     _tier_progress(approx_pct),
+        "percentile":        round(approx_pct, 1),
+        "total_credits":     round(completed_credits, 1),
+        "tier_score":        round(tier_score, 1),
+        "credits_score":     scores["credits_score"],
+        "skill_score":       scores["skill_score"],
+        "consistency_score": scores["consistency_score"],
+        "recency_score":     scores["recency_score"],
+        "scored_by":         scored_by,
+    }
 
 
 def compute_and_cache_tiers(uids, population_scores=None, skill_norm=None,
@@ -181,8 +285,6 @@ def compute_and_cache_tiers(uids, population_scores=None, skill_norm=None,
     job passes a prior month with `write_cache=False` so it never overwrites the
     live tier_{uid} cache."""
     from nova_db.gpt_cache import set_cache
-    from nova_db.tier_scores import get_all_tier_scores
-    from services.skill_service import get_team_skill_scores
 
     uids = [int(u) for u in uids]
     if not uids:
@@ -191,73 +293,15 @@ def compute_and_cache_tiers(uids, population_scores=None, skill_norm=None,
     tm = target_month or _current_month()
     _, _, days_in_month = _month_bounds(tm)
 
-    if population_scores is None:
-        population_scores = get_all_tier_scores()
-    sorted_scores = sorted(population_scores.values(), reverse=True)
-    total_pop = len(sorted_scores)
-
-    if inputs is not None:
-        credits_map, recency_map, active_map = inputs
-    else:
-        credits_map, recency_map, active_map = _batch_tier_inputs(uids, tm)
-    # Recency denominator must match the population being ranked. The badge job
-    # passes the prior month's average explicitly; the live path uses the cached
-    # (current-month) average written by refresh_tier_scores_cache.
-    avg = recency_avg if recency_avg is not None else _global_avg_30d()
-
-    if skill_norm is None:
-        try:
-            skill_norm = get_team_skill_scores(uids)
-        except Exception as exc:
-            logger.warning("compute_and_cache_tiers: skill scores failed: %s", exc)
-            skill_norm = {}
+    sorted_scores, total_pop = _resolve_ranking_population(population_scores)
+    credits_map, recency_map, active_map, avg = _resolve_tier_inputs(uids, tm, inputs, recency_avg)
+    skill_norm = _resolve_skill_norm(uids, skill_norm)
 
     out: dict = {}
     for uid in uids:
-        tc   = credits_map.get(uid, 0.0)
-        u30  = recency_map.get(uid, 0.0)
-        ad90 = active_map.get(uid, 0)
-
-        # Monthly normalisation: credits vs a monthly target, consistency vs the
-        # days in the month, recency vs the (monthly) company average.
-        credits_score     = round(min(tc / settings.monthly_credit_target * 100, 100), 1)
-        consistency_score = round(min(ad90 / days_in_month * 100, 100), 1)
-        recency_score     = round(min(u30 / avg / 3 * 100, 100), 1)
-        if uid in skill_norm:
-            skill_score = round(
-                sum(v for k, v in skill_norm[uid].items() if not k.startswith("_")) / 5, 1)
-        else:
-            skill_score = 0.0
-
-        tier_score = (
-            credits_score * 0.30
-            + skill_score * 0.35
-            + consistency_score * 0.20
-            + recency_score * 0.15
-        )
-
-        if total_pop > 0:
-            rank = sum(1 for s in sorted_scores if s > tier_score)
-            approx_pct = rank / total_pop * 100
-        else:
-            approx_pct = 50.0
-
-        current_tier, next_tier = _percentile_to_tier(approx_pct)
-        scored_by = skill_norm.get(uid, {}).get("_scored_by", "keywords")
-
-        result = {
-            "current_tier":      current_tier,
-            "next_tier":         next_tier,
-            "tier_progress":     _tier_progress(approx_pct),
-            "percentile":        round(approx_pct, 1),
-            "total_credits":     round(tc, 1),
-            "tier_score":        round(tier_score, 1),
-            "credits_score":     credits_score,
-            "skill_score":       skill_score,
-            "consistency_score": consistency_score,
-            "recency_score":     recency_score,
-            "scored_by":         scored_by,
-        }
+        result = _compute_user_tier_score(
+            uid, credits_map, recency_map, active_map, skill_norm, avg,
+            days_in_month, sorted_scores, total_pop)
         if write_cache:
             set_cache(f"tier_{uid}", result, "batch", ttl_hours=_TIER_CACHE_TTL_HOURS)
         out[uid] = result

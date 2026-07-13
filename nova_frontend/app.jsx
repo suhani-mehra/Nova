@@ -99,8 +99,6 @@ function tabsForAccount(account) {
   return account === 'manager' ? managerTabList() : (TABS[account] || TABS.employee);
 }
 
-const EXEC_DEV_IDS = new Set([16467, 16465, 16470]);
-
 function ExecDevPanel({ myId }) {
   const myIdNum = myId ? parseInt(myId, 10) : null;
 
@@ -147,7 +145,7 @@ function ExecDevPanel({ myId }) {
     window.location.reload();
   };
 
-  if (!EXEC_DEV_IDS.has(myIdNum)) return null;
+  if (!NOVA.DEV_USER_IDS.has(myIdNum)) return null;
 
   return h('div', { className: 'exec-dev-panel' + (currentTarget ? ' active' : ''), ref: panelRef },
     h('span', { className: 'exec-dev-label' }, '⚡'),

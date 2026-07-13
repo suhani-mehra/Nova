@@ -3,24 +3,33 @@ services/team_service.py
 Team-level highlights, accomplishments, and at-risk detection.
 """
 
+import logging
 from datetime import date, timedelta
 
 from core.database import query
 from services.skill_service import _classify
 from services.streak_service import calculate_streak
 
+logger = logging.getLogger(__name__)
+
+# Shared active-employee condition set, reused across every query in this
+# module that filters dim_classmate_employee_profile by manager. Mirrors the
+# per-row conditions of core.queries._DEDUP_CTE (that CTE form isn't used
+# here since these queries don't need SCD dedup, just the same active filter).
+_ACTIVE_EMPLOYEE_FILTER_SQL = (
+    "is_active = 1 AND is_deleted = 0 AND etl_isactive = 1 "
+    "AND (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%') "
+    "AND country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'"
+)
+
 
 def get_team_highlights(manager_user_id: int, conn=None) -> dict:
     reports = query(
-        """
+        f"""
         SELECT user_id, display_name
         FROM   dim_classmate_employee_profile
         WHERE  manager      = ?
-          AND  is_active    = 1
-          AND  is_deleted   = 0
-          AND  etl_isactive = 1
-          AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
-          AND  country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
+          AND  {_ACTIVE_EMPLOYEE_FILTER_SQL}
         """,
         (manager_user_id,),
     )
@@ -79,8 +88,8 @@ def get_team_highlights(manager_user_id: int, conn=None) -> dict:
             if s["current_streak"] > best_streak:
                 best_streak = s["current_streak"]
                 best_streak_uid = uid
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("get_team_highlights: calculate_streak failed for uid=%s: %s", uid, exc)
 
     return {
         "top_learner": {
@@ -111,7 +120,7 @@ def get_team_accomplishments(
     if own_user_id is not None:
         # Include both peer group and own direct reports
         rows = query(
-            """
+            f"""
             SELECT vt.user_id, vt.display_name AS employee_name,
                 vt.course_name, vt.completed_on, vt.learning_credits
             FROM   vw_classmate_trainings vt
@@ -122,11 +131,7 @@ def get_team_accomplishments(
                   SELECT DISTINCT user_id
                   FROM   dim_classmate_employee_profile
                   WHERE  manager IN (?, ?)
-                    AND  is_active    = 1
-                    AND  is_deleted   = 0
-                    AND  etl_isactive = 1
-                    AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
-                    AND  country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
+                    AND  {_ACTIVE_EMPLOYEE_FILTER_SQL}
               )
             ORDER BY vt.completed_on DESC
         LIMIT 50
@@ -135,7 +140,7 @@ def get_team_accomplishments(
         )
     else:
         rows = query(
-            """
+            f"""
             SELECT vt.user_id, vt.display_name AS employee_name,
                 vt.course_name, vt.completed_on, vt.learning_credits
             FROM   vw_classmate_trainings vt
@@ -145,11 +150,7 @@ def get_team_accomplishments(
                   SELECT DISTINCT user_id
                   FROM   dim_classmate_employee_profile
                   WHERE  manager      = ?
-                    AND  is_active    = 1
-                    AND  is_deleted   = 0
-                    AND  etl_isactive = 1
-                    AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
-                    AND  country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
+                    AND  {_ACTIVE_EMPLOYEE_FILTER_SQL}
               )
             ORDER BY vt.completed_on DESC
         LIMIT 50
@@ -171,7 +172,7 @@ def get_team_accomplishments(
 
 def get_team_course_popularity(manager_user_id: int, conn=None) -> list:
     rows = query(
-        """
+        f"""
         SELECT vt.course_name, COUNT(*) AS completion_count
         FROM   vw_classmate_trainings vt
         WHERE  vt.status = 4052
@@ -179,11 +180,7 @@ def get_team_course_popularity(manager_user_id: int, conn=None) -> list:
               SELECT DISTINCT user_id
               FROM   dim_classmate_employee_profile
               WHERE  manager      = ?
-                AND  is_active    = 1
-                AND  is_deleted   = 0
-                AND  etl_isactive = 1
-                AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
-                AND  country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
+                AND  {_ACTIVE_EMPLOYEE_FILTER_SQL}
           )
         GROUP BY vt.course_name
         ORDER BY completion_count DESC
@@ -203,15 +200,11 @@ def get_team_course_popularity(manager_user_id: int, conn=None) -> list:
 
 def get_at_risk_employees(manager_user_id: int, conn=None) -> list:
     reports = query(
-        """
+        f"""
         SELECT user_id, display_name
         FROM   dim_classmate_employee_profile
         WHERE  manager      = ?
-          AND  is_active    = 1
-          AND  is_deleted   = 0
-          AND  etl_isactive = 1
-          AND  (employee_id IS NULL OR UPPER(TRIM(employee_id)) NOT LIKE 'TMP%')
-          AND  country_code IS NOT NULL AND UPPER(TRIM(country_code)) != 'OT'
+          AND  {_ACTIVE_EMPLOYEE_FILTER_SQL}
         """,
         (manager_user_id,),
     )

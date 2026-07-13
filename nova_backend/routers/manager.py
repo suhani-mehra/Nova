@@ -145,7 +145,7 @@ def _prewarm_streak_cache(chunk_size: int = 500):
         chunk = cold[i : i + chunk_size]
         # Placeholder count for IN(...), not a value — each id is still bound
         # through the parameterised '?' slots below, never concatenated.
-        ph = ",".join("?" * len(chunk))
+        placeholders = ",".join("?" * len(chunk))
         try:
             activity_rows = _query(
                 f"""
@@ -153,15 +153,15 @@ def _prewarm_streak_cache(chunk_size: int = 500):
                 FROM (
                     SELECT user_id, credit_date AS activity_date
                     FROM fact_classmate_learning_credit
-                    WHERE user_id IN ({ph}) AND is_deleted=0 AND duration>0
+                    WHERE user_id IN ({placeholders}) AND is_deleted=0 AND duration>0
                     UNION
                     SELECT user_id, date(modified_on)
                     FROM fact_classmate_user_skill_status
-                    WHERE user_id IN ({ph}) AND is_deleted=0 AND is_active=1
+                    WHERE user_id IN ({placeholders}) AND is_deleted=0 AND is_active=1
                     UNION
                     SELECT user_id, attended_date
                     FROM fact_classmate_self_study
-                    WHERE user_id IN ({ph}) AND status=2 AND is_deleted=0
+                    WHERE user_id IN ({placeholders}) AND status=2 AND is_deleted=0
                 ) src
                 WHERE activity_date IS NOT NULL
                   AND activity_date >= date('now', '-365 days')
@@ -172,7 +172,7 @@ def _prewarm_streak_cache(chunk_size: int = 500):
                 f"""
                 SELECT user_id, SUM(duration) AS total_dur
                 FROM fact_classmate_learning_credit
-                WHERE user_id IN ({ph}) AND is_deleted=0 AND duration>0
+                WHERE user_id IN ({placeholders}) AND is_deleted=0 AND duration>0
                   AND credit_date >= ? AND credit_date <= ?
                 GROUP BY user_id
                 """,
@@ -224,10 +224,10 @@ def _prewarm_streak_cache(chunk_size: int = 500):
 
 def _prewarm_manager_people_cache(chunk_size: int = 20):
     """
-    Pre-warm people_list_{mgr_id}_all for every active manager.
+    Pre-warm people_list_{manager_id}_all for every active manager.
     Called at 3 AM after classify/streak/tier caches are warm,
     so _build_people_list() runs cheaply (no per-user Fabric queries).
-    Also populates direct_reports_{mgr_id} as a side effect.
+    Also populates direct_reports_{manager_id} as a side effect.
     """
     mgr_rows = _query("""
         SELECT DISTINCT manager AS mgr_id
@@ -246,11 +246,11 @@ def _prewarm_manager_people_cache(chunk_size: int = 20):
 
     for i in range(0, len(mgr_ids), chunk_size):
         chunk = mgr_ids[i: i + chunk_size]
-        for mgr_id in chunk:
+        for manager_id in chunk:
             try:
-                _build_people_list(mgr_id, "all")
+                _build_people_list(manager_id, "all")
             except Exception as exc:
-                logger.warning("manager people pre-warm failed for mgr=%s: %s", mgr_id, exc)
+                logger.warning("manager people pre-warm failed for mgr=%s: %s", manager_id, exc)
         logger.info(
             "manager people pre-warm: %d/%d done",
             min(i + chunk_size, len(mgr_ids)),
@@ -344,7 +344,7 @@ def _get_team_active_this_week(uids: list) -> int:
     sunday = monday + timedelta(days=6)
     # Placeholder count for IN(...), not a value — each id is still bound
     # through the parameterised '?' slots below, never concatenated.
-    ph = ",".join("?" * len(uids))
+    placeholders = ",".join("?" * len(uids))
     rows = _query(
         f"""
         SELECT COUNT(DISTINCT src.user_id) AS n
@@ -364,7 +364,7 @@ def _get_team_active_this_week(uids: list) -> int:
             WHERE status = 2 AND is_deleted = 0
               AND attended_date >= ? AND attended_date <= ?
         ) src
-        WHERE src.user_id IN ({ph})
+        WHERE src.user_id IN ({placeholders})
         """,
         (monday, sunday, monday, sunday, monday, sunday, *uids),
     )
@@ -382,14 +382,14 @@ def _get_team_courses_completed_this_week(uids: list) -> int:
     sunday = monday + timedelta(days=6)
     # Placeholder count for IN(...), not a value — each id is still bound
     # through the parameterised '?' slots below, never concatenated.
-    ph = ",".join("?" * len(uids))
+    placeholders = ",".join("?" * len(uids))
     rows = _query(
         f"""
         SELECT COUNT(*) AS n
         FROM vw_classmate_trainings
         WHERE status = 4052
           AND completed_on >= ? AND completed_on <= ?
-          AND user_id IN ({ph})
+          AND user_id IN ({placeholders})
         """,
         (monday, sunday, *uids),
     )
@@ -626,7 +626,7 @@ def _compute_quarterly_ai_proficiency() -> list:
         cert_rows = []
 
     try:
-        lc_rows = _query("""
+        learning_credit_rows = _query("""
             SELECT user_id, topic AS name, MIN(credit_date) AS completed_on
             FROM fact_classmate_learning_credit
             WHERE is_deleted=0
@@ -639,7 +639,7 @@ def _compute_quarterly_ai_proficiency() -> list:
         """)
     except Exception as exc:
         logger.warning("ai_proficiency_trend: LC query failed: %s", exc)
-        lc_rows = []
+        learning_credit_rows = []
 
     def _tid(topic: str) -> int:
         return _zlib.crc32(topic.encode("utf-8", errors="replace")) & 0x7FFFFFFF
@@ -667,7 +667,7 @@ def _compute_quarterly_ai_proficiency() -> list:
         all_events.append((uid, pair, co_date))
         lookup_pairs.add(pair)
 
-    for r in lc_rows:
+    for r in learning_credit_rows:
         uid  = r["user_id"]
         name = r.get("name") or ""
         co   = r["completed_on"]
@@ -867,19 +867,20 @@ def _compute_manager_team_snapshot() -> list:
     K = 8
 
     result = []
-    for mgr_id, uids_in_team in mgr_uids.items():
+    for manager_id, uids_in_team in mgr_uids.items():
         if not uids_in_team:
             continue
         n = len(uids_in_team)
         avg_skill = round(sum(uid_skill.get(uid, 0.0) for uid in uids_in_team) / n, 1)
         shrunk_skill = round((n * avg_skill + K * company_avg) / (n + K), 1)
         try:
-            prof = get_employee_profile(None, mgr_id)
-            name = prof[0]["name"] if prof and prof[0].get("name") else f"Manager {mgr_id}"
-        except Exception:
-            name = f"Manager {mgr_id}"
+            prof = get_employee_profile(None, manager_id)
+            name = prof[0]["name"] if prof and prof[0].get("name") else f"Manager {manager_id}"
+        except Exception as exc:
+            logger.warning("top_teams_radar: profile lookup failed for manager_id=%s: %s", manager_id, exc)
+            name = f"Manager {manager_id}"
         result.append({
-            "manager_id":        mgr_id,        # kept so the radar-overlay helper can re-fetch members
+            "manager_id":        manager_id,        # kept so the radar-overlay helper can re-fetch members
             "name":              name,
             "headcount":         n,
             "avg_skill_pct":     shrunk_skill,   # shrunk score — what the leaderboard ranks/shows
@@ -911,25 +912,67 @@ def _get_top_teams_with_radar() -> list:
     snapshot = _compute_manager_team_snapshot()  # returns cached list if warm
     out = []
     for team in snapshot[:5]:
-        mgr_id = team.get("manager_id")
-        if mgr_id is None:
+        manager_id = team.get("manager_id")
+        if manager_id is None:
             continue
         try:
-            reports = get_direct_reports(None, mgr_id)
+            reports = get_direct_reports(None, manager_id)
             uids = [r["user_id"] for r in reports]
             radar = get_team_skill_radar(uids)
             out.append({
-                "manager_id":    mgr_id,
+                "manager_id":    manager_id,
                 "name":          team.get("name"),
                 "avg_skill_pct": team.get("avg_skill_pct"),
                 "axes":          radar.get("axes"),
                 "this_month":    radar.get("this_month"),
             })
         except Exception as exc:
-            logger.warning("top_teams_radar: failed for mgr %s: %s", mgr_id, exc)
+            logger.warning("top_teams_radar: failed for mgr %s: %s", manager_id, exc)
 
     set_cache("top_teams_radar", out, "computed", ttl_hours=25)
     return out
+
+
+def _batch_ai_scores(uid_list: list, caller_label: str) -> dict:
+    """AI score per uid — warm classify_{uid} cache first, batch-compute the
+    rest via get_team_skill_scores. Shared by _compute_ai_proficiency_by_region,
+    _compute_proficiency_by_vertical, _compute_specialization_landscape, and
+    _compute_team_quadrant (previously duplicated identically in all four).
+    `caller_label` tags the warning log so failures are traceable to the
+    calling function."""
+    from nova_db.gpt_cache import get_cache
+    uid_ai: dict = {}
+    uncached_uids: list = []
+    for uid in uid_list:
+        c = get_cache(f"classify_{uid}")
+        if c:
+            res = c.get("result", {})
+            axes = res.get("axes", ["AI", "Cloud", "Frontend", "Backend", "Data"])
+            this_month = res.get("this_month", [])
+            try:
+                ai_idx = axes.index("AI")
+                uid_ai[uid] = float(this_month[ai_idx]) if ai_idx < len(this_month) else 0.0
+            except (ValueError, IndexError) as exc:
+                logger.warning("classify cache shape mismatch for uid=%s: %s", uid, exc)
+                uid_ai[uid] = 0.0
+        else:
+            uncached_uids.append(uid)
+
+    if uncached_uids:
+        try:
+            from services.skill_service import get_team_skill_scores
+            BATCH = 500
+            for i in range(0, len(uncached_uids), BATCH):
+                batch = uncached_uids[i: i + BATCH]
+                team_norm = get_team_skill_scores(batch)
+                for uid in batch:
+                    uid_ai[uid] = round(team_norm.get(uid, {}).get("AI", 0.0), 1)
+        except Exception as exc:
+            logger.warning("%s: skill scores failed for uncached batch: %s", caller_label, exc)
+            for uid in uncached_uids:
+                uid_ai.setdefault(uid, 0.0)
+
+    return uid_ai
 
 
 _region_snapshot_computing = False  # guard against concurrent region snapshot recomputes
@@ -996,35 +1039,7 @@ def _compute_ai_proficiency_by_region() -> dict:
 
     # Read AI scores from gpt_cache first, then batch-compute the uncached —
     # same warm-cache path used elsewhere so scoring logic is never duplicated.
-    uid_ai: dict = {}
-    uncached_uids: list = []
-    for uid in all_uid_list:
-        c = get_cache(f"classify_{uid}")
-        if c:
-            res = c.get("result", {})
-            axes = res.get("axes", ["AI", "Cloud", "Frontend", "Backend", "Data"])
-            this_month = res.get("this_month", [])
-            try:
-                ai_idx = axes.index("AI")
-                uid_ai[uid] = float(this_month[ai_idx]) if ai_idx < len(this_month) else 0.0
-            except (ValueError, IndexError):
-                uid_ai[uid] = 0.0
-        else:
-            uncached_uids.append(uid)
-
-    if uncached_uids:
-        try:
-            from services.skill_service import get_team_skill_scores
-            BATCH = 500
-            for i in range(0, len(uncached_uids), BATCH):
-                batch = uncached_uids[i: i + BATCH]
-                team_norm = get_team_skill_scores(batch)
-                for uid in batch:
-                    uid_ai[uid] = round(team_norm.get(uid, {}).get("AI", 0.0), 1)
-        except Exception as exc:
-            logger.warning("ai_proficiency_by_region: skill scores failed for uncached batch: %s", exc)
-            for uid in uncached_uids:
-                uid_ai.setdefault(uid, 0.0)
+    uid_ai = _batch_ai_scores(all_uid_list, "ai_proficiency_by_region")
 
     total = len(all_uid_list)
     region_totals = {reg: 0 for reg in REGION_ORDER}
@@ -1163,35 +1178,7 @@ def _compute_proficiency_by_vertical() -> dict:
 
     # AI scores: warm classify_{uid} cache first, batch-compute the uncached —
     # identical path to _compute_ai_proficiency_by_region.
-    uid_ai: dict = {}
-    uncached_uids: list = []
-    for uid in all_uid_list:
-        c = get_cache(f"classify_{uid}")
-        if c:
-            res = c.get("result", {})
-            axes = res.get("axes", ["AI", "Cloud", "Frontend", "Backend", "Data"])
-            this_month = res.get("this_month", [])
-            try:
-                ai_idx = axes.index("AI")
-                uid_ai[uid] = float(this_month[ai_idx]) if ai_idx < len(this_month) else 0.0
-            except (ValueError, IndexError):
-                uid_ai[uid] = 0.0
-        else:
-            uncached_uids.append(uid)
-
-    if uncached_uids:
-        try:
-            from services.skill_service import get_team_skill_scores
-            BATCH = 500
-            for i in range(0, len(uncached_uids), BATCH):
-                batch = uncached_uids[i: i + BATCH]
-                team_norm = get_team_skill_scores(batch)
-                for uid in batch:
-                    uid_ai[uid] = round(team_norm.get(uid, {}).get("AI", 0.0), 1)
-        except Exception as exc:
-            logger.warning("proficiency_by_vertical: skill scores failed for uncached batch: %s", exc)
-            for uid in uncached_uids:
-                uid_ai.setdefault(uid, 0.0)
+    uid_ai = _batch_ai_scores(all_uid_list, "proficiency_by_vertical")
 
     threshold = settings.ai_proficiency_min_score
     totals: dict = {}
@@ -1300,35 +1287,7 @@ def _compute_specialization_landscape() -> dict:
 
     # AI scores: warm classify_{uid} cache first, batch-compute the uncached —
     # identical path to _compute_proficiency_by_vertical.
-    uid_ai: dict = {}
-    uncached_uids: list = []
-    for uid in all_uid_list:
-        c = get_cache(f"classify_{uid}")
-        if c:
-            res = c.get("result", {})
-            axes = res.get("axes", ["AI", "Cloud", "Frontend", "Backend", "Data"])
-            this_month = res.get("this_month", [])
-            try:
-                ai_idx = axes.index("AI")
-                uid_ai[uid] = float(this_month[ai_idx]) if ai_idx < len(this_month) else 0.0
-            except (ValueError, IndexError):
-                uid_ai[uid] = 0.0
-        else:
-            uncached_uids.append(uid)
-
-    if uncached_uids:
-        try:
-            from services.skill_service import get_team_skill_scores
-            BATCH = 500
-            for i in range(0, len(uncached_uids), BATCH):
-                batch = uncached_uids[i: i + BATCH]
-                team_norm = get_team_skill_scores(batch)
-                for uid in batch:
-                    uid_ai[uid] = round(team_norm.get(uid, {}).get("AI", 0.0), 1)
-        except Exception as exc:
-            logger.warning("specialization_landscape: skill scores failed for uncached batch: %s", exc)
-            for uid in uncached_uids:
-                uid_ai.setdefault(uid, 0.0)
+    uid_ai = _batch_ai_scores(all_uid_list, "specialization_landscape")
 
     threshold = settings.ai_proficiency_min_score
     proficient: dict = {}
@@ -1448,35 +1407,7 @@ def _compute_team_quadrant() -> dict:
         logger.warning("team_quadrant: active-days query failed: %s", exc)
 
     # AI score per uid — warm classify_{uid} cache first, batch-compute the rest.
-    uid_ai: dict = {}
-    uncached_uids: list = []
-    for uid in all_uids:
-        c = get_cache(f"classify_{uid}")
-        if c:
-            res = c.get("result", {})
-            axes = res.get("axes", ["AI", "Cloud", "Frontend", "Backend", "Data"])
-            this_month = res.get("this_month", [])
-            try:
-                ai_idx = axes.index("AI")
-                uid_ai[uid] = float(this_month[ai_idx]) if ai_idx < len(this_month) else 0.0
-            except (ValueError, IndexError):
-                uid_ai[uid] = 0.0
-        else:
-            uncached_uids.append(uid)
-
-    if uncached_uids:
-        try:
-            from services.skill_service import get_team_skill_scores
-            BATCH = 500
-            for i in range(0, len(uncached_uids), BATCH):
-                batch = uncached_uids[i: i + BATCH]
-                team_norm = get_team_skill_scores(batch)
-                for uid in batch:
-                    uid_ai[uid] = round(team_norm.get(uid, {}).get("AI", 0.0), 1)
-        except Exception as exc:
-            logger.warning("team_quadrant: skill scores failed for uncached batch: %s", exc)
-            for uid in uncached_uids:
-                uid_ai.setdefault(uid, 0.0)
+    uid_ai = _batch_ai_scores(all_uids, "team_quadrant")
 
     # Per-team aggregation (drop teams whose manager has no mapped continent).
     teams = []
@@ -1591,14 +1522,14 @@ def _fuzzy_filter(rows: list, q: str) -> list:
     return ([r for _, r in exact] + [r for _, r in token_match] + fuzzy_match)[:50]
 
 
-def _search_recursive_org(mgr_id: int, q: str) -> list:
+def _search_recursive_org(manager_id: int, q: str) -> list:
     """Search everyone in a manager's org subtree — direct AND indirect reports,
     walking the `manager` field transitively. Derived from _DEDUP_CTE (promoted to
     WITH RECURSIVE) so the active/non-TMP dedup filter stays identical; an `org`
-    CTE seeds from mgr_id's direct reports and recurses down. UNION (not UNION ALL)
+    CTE seeds from manager_id's direct reports and recurses down. UNION (not UNION ALL)
     dedupes visited user_ids, so a cyclic manager-chain in the source can't loop
     forever — the walk is bounded by the number of distinct people."""
-    from core.queries import _DEDUP_CTE
+    from core.queries import _DEDUP_CTE, _title_case_fields
     cte = _DEDUP_CTE.replace("WITH latest_profiles", "WITH RECURSIVE latest_profiles", 1)
     rows = _query(
         cte + """,
@@ -1619,17 +1550,14 @@ def _search_recursive_org(mgr_id: int, q: str) -> list:
         WHERE ep.rn = 1
         ORDER BY ep.display_name
         """,
-        (mgr_id,),
+        (manager_id,),
     )
-    for r in rows:
-        for f in ("name", "department", "designation"):
-            if r.get(f):
-                r[f] = r[f].title()
+    _title_case_fields(rows)
     return _fuzzy_filter(rows, q)
 
 
 def _search_company_wide(q: str) -> list:
-    from core.queries import _DEDUP_CTE
+    from core.queries import _DEDUP_CTE, _title_case_fields
     rows = _query(
         _DEDUP_CTE + """
         SELECT ep.user_id,
@@ -1641,10 +1569,7 @@ def _search_company_wide(q: str) -> list:
         ORDER BY ep.display_name
         """,
     )
-    for r in rows:
-        for f in ("name", "department", "designation"):
-            if r.get(f):
-                r[f] = r[f].title()
+    _title_case_fields(rows)
     return _fuzzy_filter(rows, q)
 
 
@@ -1653,39 +1578,39 @@ def _enrich_search_results(uids: list, rows: list) -> list:
         return []
     # Placeholder count for IN(...), not a value — each id is still bound
     # through the parameterised '?' slots below, never concatenated.
-    ph = ",".join("?" * len(uids))
+    placeholders = ",".join("?" * len(uids))
     uid_to_row = {r["user_id"]: r for r in rows}
 
     uid_credits: dict = {}
     try:
-        cr = _query(
+        credit_rows = _query(
             f"""SELECT user_id, SUM(learning_credits) AS credits
                 FROM vw_classmate_trainings
-                WHERE user_id IN ({ph})
+                WHERE user_id IN ({placeholders})
                   AND status=4052
                   AND completed_on >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-90 days')
                 GROUP BY user_id""",
             tuple(uids),
         )
-        uid_credits = {r["user_id"]: float(r["credits"] or 0) for r in cr}
-    except Exception:
-        pass
+        uid_credits = {r["user_id"]: float(r["credits"] or 0) for r in credit_rows}
+    except Exception as exc:
+        logger.warning("_enrich_search_results: credits query failed: %s", exc)
 
     uid_last: dict = {}
     try:
-        lr = _query(
+        last_credit_rows = _query(
             f"""SELECT user_id, MAX(credit_date) AS last
                 FROM fact_classmate_learning_credit
-                WHERE user_id IN ({ph}) AND is_deleted=0
+                WHERE user_id IN ({placeholders}) AND is_deleted=0
                 GROUP BY user_id""",
             tuple(uids),
         )
-        for r in lr:
+        for r in last_credit_rows:
             d = r["last"]
             if d:
                 uid_last[r["user_id"]] = str(d.date() if hasattr(d, "date") else d)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("_enrich_search_results: last-active query failed: %s", exc)
 
     uid_ai: dict = {}
     uid_scored_by: dict = {}
@@ -1730,6 +1655,151 @@ def _enrich_search_results(uids: list, rows: list) -> list:
     return result
 
 
+def _fetch_overview_swr_data(manager_id: int) -> dict:
+    """All 9 stale-while-revalidate data fetches for /manager/overview (return
+    last-cached value instantly, recompute in background so the request never
+    blocks on a Fabric scan), plus the manual ai_proficiency_trend cache read
+    and the team-leaderboard sort. Mutates the module-level _trend_computing
+    guard directly — must stay a mutation here (not a return value) so
+    concurrent requests see it immediately and never double-schedule the
+    trend recompute."""
+    global _trend_computing
+
+    at_risk = _swr(
+        f"at_risk_{manager_id}",
+        lambda: get_at_risk_employees(manager_id),
+        [],
+    )
+    overview_stats = _swr(
+        "company_overview_stats", _compute_company_overview_stats,
+        {"headcount": 0, "active_this_week": 0,
+         "avg_credits_this_quarter": 0.0},
+    )
+    retention = _swr(
+        "retention_snapshot", _compute_company_retention,
+        {"rate": 0.0, "trend_pct": 0.0, "trend_dir": "flat"},
+    )
+    at_risk_count = _swr(
+        "company_at_risk_count", _compute_company_at_risk_count,
+        {"count": 0, "trend_pct": 0.0, "trend_dir": "flat"},
+    )
+
+    from nova_db.gpt_cache import get_cache
+    cached_trend = get_cache("ai_proficiency_trend")
+    if cached_trend:
+        monthly_trend = cached_trend["result"]
+    else:
+        monthly_trend = _default_quarterly_trend()
+        if not _trend_computing:
+            _trend_computing = True
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(_executor, _compute_quarterly_ai_proficiency)
+
+    # AI proficiency by region (bar-chart tab). Stale-while-revalidate so the
+    # request never blocks on a full company scan; empty placeholder until
+    # the background compute finishes.
+    proficiency_by_region = _swr(
+        "ai_proficiency_by_region",
+        _compute_ai_proficiency_by_region,
+        _default_region_snapshot(),
+    )
+
+    # Proficiency by vertical (bar chart) — % AI-proficient per industry group.
+    proficiency_by_vertical = _swr(
+        "proficiency_by_vertical",
+        _compute_proficiency_by_vertical,
+        _default_proficiency_by_vertical(),
+    )
+
+    # Specialization landscape (stacked bar) — share of AI-proficient people per role group.
+    specialization_landscape = _swr(
+        "specialization_landscape",
+        _compute_specialization_landscape,
+        _default_specialization_landscape(),
+    )
+
+    # Team landscape (4-quadrant scatter) — each dot a team by avg AI vs avg active days.
+    team_quadrant = _swr(
+        "team_quadrant",
+        _compute_team_quadrant,
+        _default_team_quadrant(),
+    )
+
+    # Team Leaderboard = per-manager team skill average (name + % only),
+    # each team being one manager's direct reports scored on the mean of all
+    # 5 skill verticals. Sorted best-first; empty list until the snapshot is warm.
+    mgr_snap = _swr("team_leaderboard_by_manager", _compute_manager_team_snapshot, [])
+    team_leaderboard = sorted(
+        [{"name": m["name"], "prof": m["avg_skill_pct"], "manager_id": m["manager_id"]} for m in mgr_snap],
+        key=lambda x: x["prof"], reverse=True,
+    )
+
+    return {
+        "at_risk": at_risk,
+        "overview_stats": overview_stats,
+        "retention": retention,
+        "at_risk_count": at_risk_count,
+        "cached_trend": cached_trend,
+        "monthly_trend": monthly_trend,
+        "proficiency_by_region": proficiency_by_region,
+        "proficiency_by_vertical": proficiency_by_vertical,
+        "specialization_landscape": specialization_landscape,
+        "team_quadrant": team_quadrant,
+        "team_leaderboard": team_leaderboard,
+    }
+
+
+def _derive_ai_proficiency_metrics(cached_trend, headcount: int) -> tuple:
+    """Derives (ai_prof_pct, ai_prof_count, ai_trend_pts) from the cached
+    quarterly AI-proficiency trend and the current company headcount."""
+    if cached_trend and cached_trend["result"]:
+        trend_list    = cached_trend["result"]
+        ai_prof_pct   = trend_list[-1]["credits"]
+        ai_prof_count = round(headcount * ai_prof_pct / 100)
+        ai_trend_pts  = (
+            round(trend_list[-1]["credits"] - trend_list[-2]["credits"], 1)
+            if len(trend_list) >= 2 else 0.0
+        )
+    else:
+        ai_prof_pct   = 0.0
+        ai_prof_count = 0
+        ai_trend_pts  = 0.0
+    return ai_prof_pct, ai_prof_count, ai_trend_pts
+
+
+def _build_overview_response(data: dict, headcount, active_week,
+                              ai_prof_pct, ai_prof_count, ai_trend_pts) -> dict:
+    """Assembles the final /manager/overview response dict from the raw SWR
+    fetches (`data`, from _fetch_overview_swr_data) and the derived AI
+    proficiency metrics."""
+    overview_stats = data["overview_stats"]
+    retention = data["retention"]
+    at_risk_count = data["at_risk_count"]
+    return {
+        "kpis": {
+            "total_team":               headcount,
+            "active_this_week":         active_week,
+            "ai_proficient_count":      ai_prof_count,
+            "ai_proficient_pct":        ai_prof_pct,
+            "avg_credits_this_quarter": overview_stats["avg_credits_this_quarter"],
+            "retention_rate":           retention["rate"],
+            "retention_rate_trend_pct": retention["trend_pct"],
+            "retention_rate_trend_dir": retention["trend_dir"],
+            "ai_proficiency_trend_pts": ai_trend_pts,
+            "at_risk_count_company":    at_risk_count.get("count", 0),
+            "at_risk_count_trend_pct":  at_risk_count.get("trend_pct", 0.0),
+            "at_risk_count_trend_dir":  at_risk_count.get("trend_dir", "flat"),
+        },
+        "monthly_trend": data["monthly_trend"],
+        "proficiency_by_region": data["proficiency_by_region"],
+        "proficiency_by_vertical": data["proficiency_by_vertical"],
+        "specialization_landscape": data["specialization_landscape"],
+        "team_quadrant": data["team_quadrant"],
+        "team_leaderboard": data["team_leaderboard"],
+        "at_risk":        data["at_risk"],
+    }
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/manager/overview")
@@ -1743,127 +1813,18 @@ async def manager_overview(user: CurrentUser = Depends(get_current_user)):
     if user.classmate_user_id is None:
         raise HTTPException(status_code=503, detail="No user identity")
 
-    global _trend_computing
-    mgr_id = user.classmate_user_id
+    manager_id = user.classmate_user_id
     try:
-        # All four stats use stale-while-revalidate: return last cached value instantly
-        # and recompute in background so the request never blocks on a Fabric scan.
-        at_risk = _swr(
-            f"at_risk_{mgr_id}",
-            lambda: get_at_risk_employees(mgr_id),
-            [],
-        )
-        overview_stats = _swr(
-            "company_overview_stats", _compute_company_overview_stats,
-            {"headcount": 0, "active_this_week": 0,
-             "avg_credits_this_quarter": 0.0},
-        )
-        retention = _swr(
-            "retention_snapshot", _compute_company_retention,
-            {"rate": 0.0, "trend_pct": 0.0, "trend_dir": "flat"},
-        )
-        at_risk_count = _swr(
-            "company_at_risk_count", _compute_company_at_risk_count,
-            {"count": 0, "trend_pct": 0.0, "trend_dir": "flat"},
-        )
-
-        from nova_db.gpt_cache import get_cache
-        cached_trend = get_cache("ai_proficiency_trend")
-        if cached_trend:
-            monthly_trend = cached_trend["result"]
-        else:
-            monthly_trend = _default_quarterly_trend()
-            if not _trend_computing:
-                _trend_computing = True
-                loop = asyncio.get_event_loop()
-                loop.run_in_executor(_executor, _compute_quarterly_ai_proficiency)
-
-        headcount   = overview_stats["headcount"]
-        active_week = overview_stats["active_this_week"]
-
-        if cached_trend and cached_trend["result"]:
-            trend_list    = cached_trend["result"]
-            ai_prof_pct   = trend_list[-1]["credits"]
-            ai_prof_count = round(headcount * ai_prof_pct / 100)
-            ai_trend_pts  = (
-                round(trend_list[-1]["credits"] - trend_list[-2]["credits"], 1)
-                if len(trend_list) >= 2 else 0.0
-            )
-        else:
-            ai_prof_pct   = 0.0
-            ai_prof_count = 0
-            ai_trend_pts  = 0.0
-
-        at_risk_count_num  = at_risk_count.get("count", 0)
-        at_risk_trend_pct  = at_risk_count.get("trend_pct", 0.0)
-        at_risk_trend_dir  = at_risk_count.get("trend_dir", "flat")
-
-        # AI proficiency by region (bar-chart tab). Stale-while-revalidate so the
-        # request never blocks on a full company scan; empty placeholder until
-        # the background compute finishes.
-        proficiency_by_region = _swr(
-            "ai_proficiency_by_region",
-            _compute_ai_proficiency_by_region,
-            _default_region_snapshot(),
-        )
-
-        # Proficiency by vertical (bar chart) — % AI-proficient per industry group.
-        proficiency_by_vertical = _swr(
-            "proficiency_by_vertical",
-            _compute_proficiency_by_vertical,
-            _default_proficiency_by_vertical(),
-        )
-
-        # Specialization landscape (stacked bar) — share of AI-proficient people per role group.
-        specialization_landscape = _swr(
-            "specialization_landscape",
-            _compute_specialization_landscape,
-            _default_specialization_landscape(),
-        )
-
-        # Team landscape (4-quadrant scatter) — each dot a team by avg AI vs avg active days.
-        team_quadrant = _swr(
-            "team_quadrant",
-            _compute_team_quadrant,
-            _default_team_quadrant(),
-        )
-
-        # Team Leaderboard = per-manager team skill average (name + % only),
-        # each team being one manager's direct reports scored on the mean of all
-        # 5 skill verticals. Sorted best-first; empty list until the snapshot is warm.
-        mgr_snap = _swr("team_leaderboard_by_manager", _compute_manager_team_snapshot, [])
-        team_leaderboard = sorted(
-            [{"name": m["name"], "prof": m["avg_skill_pct"], "manager_id": m["manager_id"]} for m in mgr_snap],
-            key=lambda x: x["prof"], reverse=True,
-        )
-
+        data = _fetch_overview_swr_data(manager_id)
+        headcount   = data["overview_stats"]["headcount"]
+        active_week = data["overview_stats"]["active_this_week"]
+        ai_prof_pct, ai_prof_count, ai_trend_pts = _derive_ai_proficiency_metrics(
+            data["cached_trend"], headcount)
     except Exception as exc:
-        logger.warning("Warehouse unavailable for manager overview uid=%s: %s", mgr_id, exc)
+        logger.warning("Warehouse unavailable for manager overview uid=%s: %s", manager_id, exc)
         raise HTTPException(status_code=503, detail="Data unavailable")
 
-    return {
-        "kpis": {
-            "total_team":               headcount,
-            "active_this_week":         active_week,
-            "ai_proficient_count":      ai_prof_count,
-            "ai_proficient_pct":        ai_prof_pct,
-            "avg_credits_this_quarter": overview_stats["avg_credits_this_quarter"],
-            "retention_rate":           retention["rate"],
-            "retention_rate_trend_pct": retention["trend_pct"],
-            "retention_rate_trend_dir": retention["trend_dir"],
-            "ai_proficiency_trend_pts": ai_trend_pts,
-            "at_risk_count_company":    at_risk_count_num,
-            "at_risk_count_trend_pct":  at_risk_trend_pct,
-            "at_risk_count_trend_dir":  at_risk_trend_dir,
-        },
-        "monthly_trend": monthly_trend,
-        "proficiency_by_region": proficiency_by_region,
-        "proficiency_by_vertical": proficiency_by_vertical,
-        "specialization_landscape": specialization_landscape,
-        "team_quadrant": team_quadrant,
-        "team_leaderboard": team_leaderboard,
-        "at_risk":        at_risk,
-    }
+    return _build_overview_response(data, headcount, active_week, ai_prof_pct, ai_prof_count, ai_trend_pts)
 
 
 def _batch_tier_map(uids: list, team_norm: dict) -> dict:
@@ -1905,17 +1866,17 @@ def _batch_tier_map(uids: list, team_norm: dict) -> dict:
     return tier_map
 
 
-def _build_people_list(mgr_id: int, filter_val: str) -> list:
+def _build_people_list(manager_id: int, filter_val: str) -> list:
     from services.skill_service import get_team_skill_scores
     from nova_db.gpt_cache import get_cache, set_cache
 
     # v3 = payload now also carries active_days_total (for the scatter plot).
-    _cache_key = f"people_list_v3_{mgr_id}_{filter_val}"
+    _cache_key = f"people_list_v3_{manager_id}_{filter_val}"
     _cached = get_cache(_cache_key)
     if _cached:
         return _cached["result"]
 
-    reports = get_direct_reports(None, mgr_id)
+    reports = get_direct_reports(None, manager_id)
     if not reports:
         return []
 
@@ -1951,8 +1912,8 @@ def _build_people_list(mgr_id: int, filter_val: str) -> list:
             tuple(uids),
         )
         uid_last_active = {r["user_id"]: r["last_date"] for r in last_rows}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("_build_people_list: last-active query failed: %s", exc)
 
     # All-time distinct active days per person (for the Team Landscape scatter's
     # y-axis). Same 3-source activity union streak_service uses, but with NO date
@@ -2072,14 +2033,14 @@ def _overlay_current_tiers(employees: list) -> list:
     return employees
 
 
-def _compute_your_team(mgr_id: int) -> dict:
+def _compute_your_team(manager_id: int) -> dict:
     """Team radar + badge summary for a manager's direct reports. Writes its own
-    cache (key your_team_v3_{mgr_id}) so it can be served via _swr."""
+    cache (key your_team_v3_{manager_id}) so it can be served via _swr."""
     from services.skill_service import get_team_skill_radar
     from nova_db.badges import get_team_badge_summary
     from nova_db.gpt_cache import set_cache
 
-    reports = get_direct_reports(None, mgr_id)
+    reports = get_direct_reports(None, manager_id)
     uids = [r["user_id"] for r in reports]
     n = len(uids)
 
@@ -2096,7 +2057,7 @@ def _compute_your_team(mgr_id: int) -> dict:
         "courses_this_week": _get_team_courses_completed_this_week(uids),
         "top_teams": _get_top_teams_with_radar(),
     }
-    set_cache(f"your_team_v3_{mgr_id}", result, "computed", ttl_hours=25)
+    set_cache(f"your_team_v3_{manager_id}", result, "computed", ttl_hours=25)
     return result
 
 
@@ -2114,11 +2075,11 @@ async def manager_your_team(
     if user.classmate_user_id is None:
         raise HTTPException(status_code=503, detail="No user identity")
 
-    mgr_id = user.classmate_user_id
+    manager_id = user.classmate_user_id
     try:
-        employees = await _run(_build_people_list, mgr_id, filter)
+        employees = await _run(_build_people_list, manager_id, filter)
         employees = await _run(_overlay_current_tiers, employees)
-        extras    = _swr(f"your_team_v3_{mgr_id}", partial(_compute_your_team, mgr_id),
+        extras    = _swr(f"your_team_v3_{manager_id}", partial(_compute_your_team, manager_id),
                          {"team_size": 0, "active_this_week": 0, "courses_this_week": 0,
                           "top_teams": [],
                           "radar": {"axes": ["AI", "Cloud", "Frontend", "Backend", "Data"],
@@ -2127,7 +2088,7 @@ async def manager_your_team(
                                      "by_tier": {"platinum": 0, "diamond": 0, "gold": 0,
                                                  "silver": 0, "bronze": 0}}})
     except Exception as exc:
-        logger.warning("Warehouse unavailable for your-team uid=%s: %s", mgr_id, exc)
+        logger.warning("Warehouse unavailable for your-team uid=%s: %s", manager_id, exc)
         raise HTTPException(status_code=503, detail="Data unavailable")
 
     return {

@@ -26,6 +26,10 @@ from core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Executive dev users allowed to impersonate others for testing (dev-bypass
+# and production paths both check against this same set).
+EXEC_DEV_USER_IDS = {16467, 16465, 16470}  # Niva Shah, Eric Verdes, Suhani Mehra
+
 # ── Bearer token extractor ────────────────────────────────────────────────────
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -128,7 +132,7 @@ async def _get_dev_user() -> CurrentUser:
         if not user_rows:
             raise ValueError("User 5575 not found in dim_classmate_user")
 
-        u = user_rows[0]
+        dev_user_row = user_rows[0]
 
         profile_rows = warehouse_query(
             """
@@ -156,9 +160,9 @@ async def _get_dev_user() -> CurrentUser:
         if profile_rows and profile_rows[0]["name"]:
             display_name = profile_rows[0]["name"].title()
         else:
-            fn = (u.get("first_name") or "").strip()
-            ln = (u.get("last_name") or "").strip()
-            display_name = f"{fn} {ln}".strip().title() or "Pradeep Menon"
+            first_name = (dev_user_row.get("first_name") or "").strip()
+            last_name = (dev_user_row.get("last_name") or "").strip()
+            display_name = f"{first_name} {last_name}".strip().title() or "Pradeep Menon"
 
         mgr_rows = warehouse_query(
             """
@@ -189,9 +193,9 @@ async def _get_dev_user() -> CurrentUser:
         _dev_user_cache = CurrentUser(
             classmate_user_id=5575,
             name=display_name,
-            email=u.get("email_id") or "pradeep.menon@orioninc.com",
+            email=dev_user_row.get("email_id") or "pradeep.menon@orioninc.com",
             role=role,
-            azure_oid=u.get("aduser_name"),
+            azure_oid=dev_user_row.get("aduser_name"),
         )
         logger.info("Dev user loaded from warehouse: %s (%s)", display_name, role)
 
@@ -206,6 +210,115 @@ async def _get_dev_user() -> CurrentUser:
         )
 
     return _dev_user_cache
+
+
+async def _resolve_dev_signed_in_user(request: Request) -> CurrentUser:
+    """Dev-bypass: resolve the signed-in user from the X-Nova-Dev-User header
+    (cached per-uid so subsequent requests skip the Fabric hit), falling back
+    to the hardcoded Fabric dev user (_get_dev_user) when the header is
+    missing, unparseable, or the referenced user isn't found."""
+    from core.queries import get_user_by_id, is_manager
+
+    dev_user_hdr = request.headers.get("X-Nova-Dev-User")
+    if not dev_user_hdr:
+        return await _get_dev_user()
+
+    try:
+        dev_uid = int(dev_user_hdr)
+        if dev_uid in _exec_dev_user_cache:
+            return _exec_dev_user_cache[dev_uid]
+        dev_rows = get_user_by_id(None, dev_uid)
+        if not dev_rows:
+            return await _get_dev_user()
+        signed_in_row = dev_rows[0]
+        signed_in_name = (signed_in_row.get("first_name", "") + " " + signed_in_row.get("last_name", "")).strip().title()
+        signed_in_role = "both" if is_manager(None, dev_uid) else "employee"
+        signed_in_user = CurrentUser(
+            classmate_user_id=dev_uid,
+            name=signed_in_name,
+            email=signed_in_row.get("email_id", ""),
+            role=signed_in_role,
+            azure_oid=None,
+        )
+        _exec_dev_user_cache[dev_uid] = signed_in_user
+        logger.info("Dev sign-in: user %s (%s)", dev_uid, signed_in_name)
+        return signed_in_user
+    except (ValueError, Exception) as e:
+        logger.warning("Dev user header failed: %s", e)
+        return await _get_dev_user()
+
+
+def _resolve_impersonation_target(
+    request: Request, actor_id: Optional[int], azure_oid: Optional[str] = None
+) -> Optional[CurrentUser]:
+    """Resolve an X-Nova-Impersonate header into a CurrentUser for the target
+    user, gated on `actor_id` being an exec dev user. Shared by both the
+    dev-bypass and production paths (azure_oid is None for dev, the real oid
+    for production). Returns None — never raises — whenever there's no header,
+    the actor isn't authorized, the target isn't found, or resolution fails;
+    callers fall through to their own non-impersonated user in every case."""
+    impersonate_hdr = request.headers.get("X-Nova-Impersonate")
+    if not (impersonate_hdr and actor_id in EXEC_DEV_USER_IDS):
+        return None
+
+    from core.queries import get_user_by_id, is_manager
+    try:
+        target_id = int(impersonate_hdr)
+        target_rows = get_user_by_id(None, target_id)
+        if target_rows:
+            target_row = target_rows[0]
+            target_name = (target_row.get("first_name", "") + " " + target_row.get("last_name", "")).strip().title()
+            target_role = "both" if is_manager(None, target_id) else "employee"
+            logger.info("Impersonation: actor %s as user %s (%s)", actor_id, target_id, target_name)
+            return CurrentUser(
+                classmate_user_id=target_id,
+                name=target_name,
+                email=target_row.get("email_id", ""),
+                role=target_role,
+                azure_oid=azure_oid,
+            )
+    except (ValueError, Exception) as exc:
+        logger.warning("Impersonation failed for %s: %s", impersonate_hdr, exc)
+    return None
+
+
+def _validate_bearer(credentials: Optional[HTTPAuthorizationCredentials]) -> dict:
+    """401-guard + Azure JWT validation; returns the decoded claims dict."""
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header missing",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return _validate_azure_token(credentials.credentials)
+
+
+def _build_prod_user(claims: dict) -> CurrentUser:
+    """Resolve Azure AD claims -> Classmate user row -> CurrentUser
+    (non-impersonated). Raises 401 if the AD email isn't found in Classmate."""
+    from core.queries import get_user_by_adname, is_manager
+
+    email = claims.get("preferred_username") or claims.get("upn") or ""
+    name = claims.get("name") or email
+    oid = claims.get("oid")
+
+    user_rows = get_user_by_adname(None, email)
+    if not user_rows:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found in Classmate — contact your administrator",
+        )
+    azure_user_row = user_rows[0]
+    classmate_user_id = int(azure_user_row["id"])
+    user_role = "both" if is_manager(None, classmate_user_id) else "employee"
+
+    return CurrentUser(
+        classmate_user_id=classmate_user_id,
+        name=name,
+        email=email,
+        role=user_role,
+        azure_oid=oid,
+    )
 
 
 # ── Main dependency — import this in every protected route ────────────────────
@@ -227,117 +340,12 @@ async def get_current_user(
 
     # ── DEV BYPASS ────────────────────────────────────────────────────────────
     if not settings.azure_configured:
-        from core.queries import get_user_by_id, is_manager
-
-        EXEC_DEV_USER_IDS = {16467, 16465, 16470}  # Niva Shah, Eric Verdes, Suhani Mehra
-
-        # Step 1: resolve the signed-in dev user (cached — avoids a Fabric hit per request)
-        dev_user_hdr = request.headers.get("X-Nova-Dev-User")
-        if dev_user_hdr:
-            try:
-                dev_uid = int(dev_user_hdr)
-                if dev_uid in _exec_dev_user_cache:
-                    signed_in_user = _exec_dev_user_cache[dev_uid]
-                else:
-                    dev_rows = get_user_by_id(None, dev_uid)
-                    if dev_rows:
-                        d = dev_rows[0]
-                        d_name = (d.get("first_name", "") + " " + d.get("last_name", "")).strip().title()
-                        d_role = "both" if is_manager(None, dev_uid) else "employee"
-                        signed_in_user = CurrentUser(
-                            classmate_user_id=dev_uid,
-                            name=d_name,
-                            email=d.get("email_id", ""),
-                            role=d_role,
-                            azure_oid=None,
-                        )
-                        _exec_dev_user_cache[dev_uid] = signed_in_user
-                        logger.info("Dev sign-in: user %s (%s)", dev_uid, d_name)
-                    else:
-                        signed_in_user = await _get_dev_user()
-            except (ValueError, Exception) as e:
-                logger.warning("Dev user header failed: %s", e)
-                signed_in_user = await _get_dev_user()
-        else:
-            signed_in_user = await _get_dev_user()
-
-        # Step 2: check for impersonation (only for exec dev users)
-        impersonate_hdr = request.headers.get("X-Nova-Impersonate")
-        if impersonate_hdr and signed_in_user.classmate_user_id in EXEC_DEV_USER_IDS:
-            try:
-                target_id = int(impersonate_hdr)
-                target_rows = get_user_by_id(None, target_id)
-                if target_rows:
-                    t = target_rows[0]
-                    t_name = (t.get("first_name", "") + " " + t.get("last_name", "")).strip().title()
-                    target_role = "both" if is_manager(None, target_id) else "employee"
-                    logger.info("Dev impersonation: user %s as user %s (%s)",
-                                signed_in_user.classmate_user_id, target_id, t_name)
-                    return CurrentUser(
-                        classmate_user_id=target_id,
-                        name=t_name,
-                        email=t.get("email_id", ""),
-                        role=target_role,
-                        azure_oid=None,
-                    )
-            except (ValueError, Exception) as e:
-                logger.warning("Dev impersonation failed for %s: %s", impersonate_hdr, e)
-
-        return signed_in_user
+        signed_in_user = await _resolve_dev_signed_in_user(request)
+        target = _resolve_impersonation_target(request, signed_in_user.classmate_user_id, azure_oid=None)
+        return target if target else signed_in_user
 
     # ── PRODUCTION: require a real Bearer token ───────────────────────────────
-    if not credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization header missing",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    token = credentials.credentials
-    claims = _validate_azure_token(token)
-
-    email = claims.get("preferred_username") or claims.get("upn") or ""
-    name = claims.get("name") or email
-    oid = claims.get("oid")
-
-    from core.queries import get_user_by_adname, is_manager
-
-    user_rows = get_user_by_adname(None, email)
-    if not user_rows:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found in Classmate — contact your administrator",
-        )
-    u = user_rows[0]
-    classmate_user_id = int(u["id"])
-    user_role = "both" if is_manager(None, classmate_user_id) else "employee"
-
-    # Executive dev mode — allow specific user IDs to impersonate others for testing
-    EXEC_DEV_USER_IDS = {16467, 16465, 16470}  # Niva Shah, Eric Verdes, Suhani Mehra
-    impersonate_hdr = request.headers.get("X-Nova-Impersonate")
-    if impersonate_hdr and classmate_user_id in EXEC_DEV_USER_IDS:
-        try:
-            target_id = int(impersonate_hdr)
-            from core.queries import get_user_by_id
-            target_rows = get_user_by_id(None, target_id)
-            if target_rows:
-                t = target_rows[0]
-                t_name = (t.get("first_name", "") + " " + t.get("last_name", "")).strip().title()
-                target_role = "both" if is_manager(None, target_id) else "employee"
-                return CurrentUser(
-                    classmate_user_id=target_id,
-                    name=t_name,
-                    email=t.get("email_id", ""),
-                    role=target_role,
-                    azure_oid=oid,
-                )
-        except (ValueError, Exception):
-            pass
-
-    return CurrentUser(
-        classmate_user_id=classmate_user_id,
-        name=name,
-        email=email,
-        role=user_role,
-        azure_oid=oid,
-    )
+    claims = _validate_bearer(credentials)
+    prod_user = _build_prod_user(claims)
+    target = _resolve_impersonation_target(request, prod_user.classmate_user_id, azure_oid=prod_user.azure_oid)
+    return target if target else prod_user

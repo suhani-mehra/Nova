@@ -65,7 +65,8 @@ def test_azure_connection():
     # Decode claims without re-verifying (token already came from Azure AD).
     try:
         claims = jose_jwt.get_unverified_claims(token_response.token)
-    except Exception:
+    except Exception as exc:
+        logger.warning("test_azure_connection: could not decode token claims: %s", exc)
         claims = {}
 
     return {

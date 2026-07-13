@@ -12,11 +12,9 @@ function SignInPage({ onSignIn, onDevSignIn, contactHref = "#" }) {
   const [devPass, setDevPass] = React.useState('');
   const [devError, setDevError] = React.useState('');
 
-  const VALID_IDS = new Set([16467, 16465, 16470]);
-
   const handleDevSubmit = () => {
     const id = parseInt(devId, 10);
-    if (!VALID_IDS.has(id) || devPass !== 'nova_v1') {
+    if (!NOVA.DEV_USER_IDS.has(id) || devPass !== 'nova_v1') {
       setDevError('Invalid credentials');
       return;
     }

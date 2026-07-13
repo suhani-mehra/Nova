@@ -2,7 +2,51 @@
 const { useState:useStateM } = React;
 
 const tierByKey = k => NOVA.TIERS.find(t=>t.key===k);
-const _fmtN = n => Math.round(n||0).toLocaleString();
+
+// Region labels/colors for the Overview "Teams" quadrant tab legend — constant,
+// doesn't depend on props/state, so it's hoisted to module scope.
+const REGION_LABELS={asia:'Asia', na:'North America', eu:'Europe'};
+const REGION_COLS={asia:'#FF4398', na:'#2ACCFF', eu:'#A634FF'};
+
+/* Overview "Trend" tab: AI-proficiency line chart + legend. */
+function buildTrendView(overview){
+  return [
+    h(LineChart,{key:'lc', months:overview.months, proficiency:overview.series.proficiency, active:overview.series.active, target:overview.target, total:overview.total}),
+    h('div',{key:'lg',className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
+      h('div',{className:'it'}, h('span',{className:'sw',style:{background:'linear-gradient(90deg,#2ACCFF,#A634FF,#FF4398)'}}),'% AI-proficient employees'),
+      h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#2ACCFF'}}),'% active learners'),
+      h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#FF4398'}}),`Target ${overview.target}%`)),
+  ];
+}
+
+/* Overview "By region" tab: regional proficiency bars + legend. */
+function buildRegionView(region){
+  return [
+    h(RegionProficiencyChart,{key:'rc', data:region}),
+    region && region.regions && h('div',{key:'rg',className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
+      region.regions.map(r=>h('div',{className:'it',key:r.key},
+        h('span',{style:{width:13,height:13,borderRadius:3,background:r.color,display:'inline-block'}}),
+        `${r.label} · ${r.total.toLocaleString()}`)),
+      h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#3a3d57'}}),'Goal per level'),
+      h('div',{className:'it'}, h('span',{style:{width:16,height:2,background:'#7a7d96',display:'inline-block'}}),'Company-wide actual')),
+  ];
+}
+
+/* Overview "Teams" tab: 4-quadrant scatter + legend. Interactive (highlight
+   cross-linked with the Team Leaderboard), so it takes the highlight state
+   and its setters as params rather than being a pure function of `quadrant`. */
+function buildQuadrantView(quadrant, activeHl, onHover, onSelect){
+  return quadrant ? [
+    h(QuadrantChart,{key:'qc', data:quadrant, highlightIds:activeHl, onHover, onSelect}),
+    h('div',{key:'qg',className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
+      ['asia','na','eu'].map(k=>h('div',{className:'it',key:k},
+        h('span',{style:{width:13,height:13,borderRadius:'50%',background:REGION_COLS[k],display:'inline-block'}}),
+        REGION_LABELS[k]))),
+  ] : [
+    h('div',{key:'qe',style:{padding:'40px 6px',color:'var(--muted)',fontSize:13,fontWeight:600,textAlign:'center'}},'No team data yet.'),
+  ];
+}
+
 // Lift the radar's visual floor so a 0 sits at the 25% ring instead of collapsing
 // to the center — matches the employee Skill Growth radar (_radarShift).
 const _mgrRadarShift = arr => (arr||[]).map(v => 25 + Math.round((v / 100) * 75));
@@ -40,8 +84,8 @@ function VerticalBars({data}){
       h('div',{className:'t1'}, data[hover].name+' · '+data[hover].pct+'% proficient'),
       h('div',{style:{fontSize:11,color:'#b7b9cc',fontWeight:600}},
         (data[hover].earners!=null && data[hover].total!=null)
-          ? _fmtN(data[hover].earners)+' of '+_fmtN(data[hover].total)+' proficient'
-          : _fmtN(data[hover].earners)+' earners'))
+          ? _fmtNum(data[hover].earners)+' of '+_fmtNum(data[hover].total)+' proficient'
+          : _fmtNum(data[hover].earners)+' earners'))
   );
 }
 
@@ -182,60 +226,35 @@ function TeamLeaderboard({rows, highlightIds, onHoverRow, scrollToId}){
 
 /* ---------------- OVERVIEW (exec managers only) ---------------- */
 function MgrOverview(){
-  const M=NOVA.manager;
-  const O=M && M.overview;
-  const S=(M && M.static) || {};
+  const mgrData=NOVA.manager;
+  const overview=mgrData && mgrData.overview;
+  const staticData=(mgrData && mgrData.static) || {};
   const [chartTab,setChartTab]=useStateM('trend');   // 'trend' (line) | 'region' (bars) | 'teams' (quadrant)
   const [hlManagers,setHlManagers]=useStateM(null);  // transient hover highlight (quadrant ↔ leaderboard)
   const [selManager,setSelManager]=useStateM(null);  // clicked team — persists + scrolls leaderboard
 
-  if(!O){
+  if(!overview){
     return h('div',{className:'page'},
       h('div',{style:{padding:'48px 0',textAlign:'center',color:'var(--muted)',fontSize:14,fontWeight:600}},
         'Loading company overview…'));
   }
 
-  const region=O.proficiencyByRegion;
-  const quadrant=O.teamQuadrant;
-  const AL=O.activeLearners;
-  const REGION_LABELS={asia:'Asia', na:'North America', eu:'Europe'};
-  const REGION_COLS={asia:'#FF4398', na:'#2ACCFF', eu:'#A634FF'};
+  const region=overview.proficiencyByRegion;
+  const quadrant=overview.teamQuadrant;
+  const activeLearners=overview.activeLearners;
 
-  const trendView = [
-    h(LineChart,{key:'lc', months:O.months, proficiency:O.series.proficiency, active:O.series.active, target:O.target, total:O.total}),
-    h('div',{key:'lg',className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
-      h('div',{className:'it'}, h('span',{className:'sw',style:{background:'linear-gradient(90deg,#2ACCFF,#A634FF,#FF4398)'}}),'% AI-proficient employees'),
-      h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#2ACCFF'}}),'% active learners'),
-      h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#FF4398'}}),`Target ${O.target}%`)),
-  ];
-
-  const regionView = [
-    h(RegionProficiencyChart,{key:'rc', data:region}),
-    region && region.regions && h('div',{key:'rg',className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
-      region.regions.map(r=>h('div',{className:'it',key:r.key},
-        h('span',{style:{width:13,height:13,borderRadius:3,background:r.color,display:'inline-block'}}),
-        `${r.label} · ${r.total.toLocaleString()}`)),
-      h('div',{className:'it'}, h('span',{className:'sw dash',style:{borderColor:'#3a3d57'}}),'Goal per level'),
-      h('div',{className:'it'}, h('span',{style:{width:16,height:2,background:'#7a7d96',display:'inline-block'}}),'Company-wide actual')),
-  ];
+  const trendView = buildTrendView(overview);
+  const regionView = buildRegionView(region);
 
   // Hover highlight takes precedence; otherwise the clicked team stays highlighted.
   const activeHl = hlManagers || (selManager!=null ? [selManager] : null);
 
-  const quadrantView = quadrant ? [
-    h(QuadrantChart,{key:'qc', data:quadrant, highlightIds:activeHl, onHover:setHlManagers, onSelect:setSelManager}),
-    h('div',{key:'qg',className:'chart-legend', style:{marginTop:14, justifyContent:'center'}},
-      ['asia','na','eu'].map(k=>h('div',{className:'it',key:k},
-        h('span',{style:{width:13,height:13,borderRadius:'50%',background:REGION_COLS[k],display:'inline-block'}}),
-        REGION_LABELS[k]))),
-  ] : [
-    h('div',{key:'qe',style:{padding:'40px 6px',color:'var(--muted)',fontSize:13,fontWeight:600,textAlign:'center'}},'No team data yet.'),
-  ];
+  const quadrantView = buildQuadrantView(quadrant, activeHl, setHlManagers, setSelManager);
 
   return h('div',{className:'page'},
     h('div',{className:'page-head'},
       h('h1',{className:'greeting'},'Learning Overview'),
-      h('div',{className:'sub'},`Company-wide progress toward AI proficiency · ${O.total.toLocaleString()} employees`)),
+      h('div',{className:'sub'},`Company-wide progress toward AI proficiency · ${overview.total.toLocaleString()} employees`)),
 
     h('div',{className:'mgr-cols'},
       // ── left column ──
@@ -259,32 +278,43 @@ function MgrOverview(){
         h('div',{className:'card', style:{flex:1,display:'flex',flexDirection:'column'}},
           h('div',{className:'card-title'},'Proficiency by Vertical'),
           h('div',{className:'card-sub', style:{marginBottom:14}},'% AI-proficient within each business vertical, ranked.'),
-          h('div',{style:{flex:1,display:'flex',alignItems:'flex-end'}}, h(VerticalBars,{data:(O && O.proficiencyByVertical) || S.verticals || []})))
+          h('div',{style:{flex:1,display:'flex',alignItems:'flex-end'}}, h(VerticalBars,{data:(overview && overview.proficiencyByVertical) || staticData.verticals || []})))
       ),
 
       // ── right rail ──
       h('div',{className:'mgr-col-rail'},
         h('div',{className:'hero-card hero-purple'},
           h('div',{className:'hero-lab'}, Icons.users({size:16,color:'#fff'}), 'Active learners this week'),
-          h('div',{className:'hero-num'}, _fmtN(AL.count)),
-          h('div',{className:'hero-sub'}, `${AL.pct.toFixed(1)}% of ${AL.total.toLocaleString()} employees`)),
+          h('div',{className:'hero-num'}, _fmtNum(activeLearners.count)),
+          h('div',{className:'hero-sub'}, `${activeLearners.pct.toFixed(1)}% of ${activeLearners.total.toLocaleString()} employees`)),
         h('div',{className:'card'},
           h('div',{className:'card-title'},'Specialization Landscape'),
           h('div',{className:'card-sub', style:{marginBottom:16}},'Share of AI-proficient employees by role group.'),
-          h(SpecializationBar,{data:(O && O.specialization) || S.specialization || []})),
+          h(SpecializationBar,{data:(overview && overview.specialization) || staticData.specialization || []})),
         h('div',{className:'card', style:{flex:1}},
           h('div',{className:'card-title', style:{marginBottom:16}},'Team Leaderboard'),
-          h(TeamLeaderboard,{rows:O.teamLeaderboard, highlightIds:activeHl,
+          h(TeamLeaderboard,{rows:overview.teamLeaderboard, highlightIds:activeHl,
             onHoverRow:(id)=>setHlManagers(id?[id]:null), scrollToId:selManager}))
       )
     )
   );
 }
 
+/* Maps direct-report rows into Team Landscape scatter points. x = all-time
+   active days, y = AI proficiency (consistent with the Overview quadrant).
+   Pure function of `people` — the scatter always shows the FULL team,
+   ignoring the current filter/search. */
+function buildScatterPoints(people){
+  return people.map(p=>{
+    const prof=(p.prof!=null)?p.prof:Math.round(p.ai_proficiency||0);
+    return {id:p.user_id, name:p.name, x:p.activeDays||0, y:prof, atRisk:(p.status==='risk')||prof<20};
+  });
+}
+
 /* ---------------- YOUR TEAM (all managers, direct reports only) ---------------- */
 function MgrYourTeam(){
-  const M=NOVA.manager;
-  const T=(M && M.team) || {people:[], radar:null, badges:null, size:0, riskCount:0};
+  const mgrData=NOVA.manager;
+  const teamData=(mgrData && mgrData.team) || {people:[], radar:null, badges:null, size:0, riskCount:0};
   const [filter,setFilter]=useStateM('all');
   const [searchQ,setSearchQ]=useStateM('');
   const [searchResults,setSearchResults]=useStateM(null);
@@ -295,8 +325,8 @@ function MgrYourTeam(){
   const [selectedId,setSelectedId]=useStateM(null);
   const debounceRef=React.useRef(null);
 
-  const people=T.people||[];
-  const topTeams=T.topTeams||[];
+  const people=teamData.people||[];
+  const topTeams=teamData.topTeams||[];
   const filtered = people.filter(p=>{
     if(filter==='all') return true;
     if(filter==='on_track') return p.status==='ok';
@@ -321,12 +351,7 @@ function MgrYourTeam(){
   const isSearching=searchQ.trim().length>0;
   const displayList=isSearching?(searchResults||[]):filtered;
 
-  // Scatter always shows the FULL team (ignores filter/search), one dot per report.
-  // x = all-time active days, y = AI proficiency (consistent with the Overview quadrant).
-  const scatterPoints=people.map(p=>{
-    const prof=(p.prof!=null)?p.prof:Math.round(p.ai_proficiency||0);
-    return {id:p.user_id, name:p.name, x:p.activeDays||0, y:prof, atRisk:(p.status==='risk')||prof<20};
-  });
+  const scatterPoints=buildScatterPoints(people);
 
   // Two-way selection between scatter and table.
   const onSelectPerson=(id)=>{
@@ -347,14 +372,14 @@ function MgrYourTeam(){
     return ()=>clearTimeout(t);
   },[selectedId]);
 
-  const radar=T.radar;
-  const badges=T.badges||{total:0,avgPerPerson:0,thisMonthCount:0,byTier:{}};
-  const active=T.activeThisWeek||{count:0,total:T.size,pct:0};
+  const radar=teamData.radar;
+  const badges=teamData.badges||{total:0,avgPerPerson:0,thisMonthCount:0,byTier:{}};
+  const active=teamData.activeThisWeek||{count:0,total:teamData.size,pct:0};
 
   return h('div',{className:'page'},
     h('div',{className:'page-head'},
       h('h1',{className:'greeting'},'Your Team'),
-      h('div',{className:'sub'},`Your direct reports · ${T.size} ${T.size===1?'person':'people'} — proficiency, badges, and streaks.`)),
+      h('div',{className:'sub'},`Your direct reports · ${teamData.size} ${teamData.size===1?'person':'people'} — proficiency, badges, and streaks.`)),
 
     // top row: radar + badges donut (left) · active learners (right)
     h('div',{className:'mgr-cols mgr-team-top', style:{marginBottom:22}},
@@ -390,7 +415,7 @@ function MgrYourTeam(){
       h('div',{className:'mgr-team-rail'},
         h('div',{className:'hero-card hero-purple hero-mini'},
           h('div',{className:'hero-lab'}, Icons.users({size:15,color:'#fff'}), 'Active learners this week'),
-          h('div',{className:'hero-num hero-num-sm'}, _fmtN(active.count))),
+          h('div',{className:'hero-num hero-num-sm'}, _fmtNum(active.count))),
         h('div',{className:'card mgr-team-scatter', style:{flex:1,display:'flex',flexDirection:'column'}},
           h('div',{className:'card-title'},'Team Landscape'),
           h('div',{className:'card-sub', style:{marginBottom:8}},'Each dot is a teammate — active days vs. AI proficiency.'),
