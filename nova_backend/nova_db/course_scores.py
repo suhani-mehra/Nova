@@ -10,7 +10,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path(__file__).parent.parent / "nova_local.db"
+from core.config import settings
+
+_DB_PATH = Path(settings.nova_local_db_path)
 
 
 def _connect() -> sqlite3.Connection:

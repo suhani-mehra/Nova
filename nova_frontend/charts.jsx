@@ -352,8 +352,11 @@ function QuadrantChart({data, highlightIds, onHover, onSelect}){
   }
 
   const hoverPt = hover!=null ? pts.find(p=>p.id===hover) : null;
-  // Draw highlighted/hovered points last so they sit on top.
-  const ordered = [...pts].sort((a,b)=>((isHl(a)||a.id===hover)?1:0)-((isHl(b)||b.id===hover)?1:0));
+  // Layer regions so denser regions sit underneath: Asia bottom, North America
+  // middle, Europe top. Highlighted/hovered points always draw last (on top).
+  const REGION_LAYER = {asia:0, na:1, eu:2};
+  const layerRank = p => (isHl(p)||p.id===hover) ? 3 : (REGION_LAYER[p.continent] ?? 0);
+  const ordered = [...pts].sort((a,b)=>layerRank(a)-layerRank(b));
 
   const dot = p => {
     const on = isHl(p) || p.id===hover;

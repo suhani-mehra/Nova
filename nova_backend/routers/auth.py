@@ -59,7 +59,7 @@ def test_azure_connection():
         logger.error("Azure AD credential acquisition failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Azure AD credential acquisition failed: {exc}",
+            detail="Azure AD credential acquisition failed",
         )
 
     # Decode claims without re-verifying (token already came from Azure AD).

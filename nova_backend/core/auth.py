@@ -27,8 +27,9 @@ from core.config import settings
 logger = logging.getLogger(__name__)
 
 # Executive dev users allowed to impersonate others for testing (dev-bypass
-# and production paths both check against this same set).
-EXEC_DEV_USER_IDS = {16467, 16465, 16470}  # Niva Shah, Eric Verdes, Suhani Mehra
+# and production paths both check against this same set). Sourced from .env
+# (EXEC_DEV_USER_IDS) so no privileged IDs are hardcoded in scanned source.
+EXEC_DEV_USER_IDS = set(settings.exec_dev_user_ids)
 
 # ── Bearer token extractor ────────────────────────────────────────────────────
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -116,6 +117,8 @@ async def _get_dev_user() -> CurrentUser:
     if _dev_user_cache is not None:
         return _dev_user_cache
 
+    dev_uid = settings.dev_fallback_user_id  # dev-only identity, sourced from .env
+
     try:
         from core.database import query as warehouse_query
 
@@ -127,10 +130,10 @@ async def _get_dev_user() -> CurrentUser:
               AND  is_active   = 1
               AND  etl_isactive = 1
             """,
-            (5575,),
+            (dev_uid,),
         )
         if not user_rows:
-            raise ValueError("User 5575 not found in dim_classmate_user")
+            raise ValueError(f"Dev user {dev_uid} not found in dim_classmate_user")
 
         dev_user_row = user_rows[0]
 
@@ -154,7 +157,7 @@ async def _get_dev_user() -> CurrentUser:
             WHERE  rn      = 1
               AND  user_id = ?
             """,
-            (5575,),
+            (dev_uid,),
         )
 
         if profile_rows and profile_rows[0]["name"]:
@@ -162,7 +165,7 @@ async def _get_dev_user() -> CurrentUser:
         else:
             first_name = (dev_user_row.get("first_name") or "").strip()
             last_name = (dev_user_row.get("last_name") or "").strip()
-            display_name = f"{first_name} {last_name}".strip().title() or "Pradeep Menon"
+            display_name = f"{first_name} {last_name}".strip().title() or "Dev User"
 
         mgr_rows = warehouse_query(
             """
@@ -184,16 +187,16 @@ async def _get_dev_user() -> CurrentUser:
             WHERE  rn      = 1
               AND  manager = ?
             """,
-            (5575,),
+            (dev_uid,),
         )
 
         report_count = int((mgr_rows[0]["report_count"] or 0)) if mgr_rows else 0
         role = "both" if report_count > 0 else "employee"
 
         _dev_user_cache = CurrentUser(
-            classmate_user_id=5575,
+            classmate_user_id=dev_uid,
             name=display_name,
-            email=dev_user_row.get("email_id") or "pradeep.menon@orioninc.com",
+            email=dev_user_row.get("email_id") or settings.dev_fallback_email,
             role=role,
             azure_oid=dev_user_row.get("aduser_name"),
         )
@@ -202,9 +205,9 @@ async def _get_dev_user() -> CurrentUser:
     except Exception as exc:
         logger.warning("Warehouse lookup failed for dev user, using fallback: %s", exc)
         _dev_user_cache = CurrentUser(
-            classmate_user_id=5575,
-            name="Pradeep Menon",
-            email="pradeep.menon@orioninc.com",
+            classmate_user_id=dev_uid,
+            name=settings.dev_fallback_email.split("@")[0].replace(".", " ").title() or "Dev User",
+            email=settings.dev_fallback_email,
             role="both",
             azure_oid=None,
         )

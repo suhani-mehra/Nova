@@ -547,8 +547,8 @@ a.reco,a.reco-card{text-decoration:none;color:inherit;cursor:pointer}
 /* compact Active-learners card: title + number only, no subtext */
 .hero-mini{flex:0 0 auto;padding:16px 20px}
 .hero-mini .hero-num-sm{font-size:34px;margin-top:6px}
-.mgr-team-scatter{min-width:0}
-@media (max-width:1000px){ .mgr-team-radar,.mgr-team-badges,.mgr-team-rail{flex:auto} }
+.mgr-team-scatter{flex:1;min-width:0}
+@media (max-width:1000px){ .mgr-team-radar,.mgr-team-scatter,.mgr-team-rail{flex:auto} }
 
 /* gradient hero stat cards (Active learners / Team badges) */
 .hero-card{border-radius:var(--radius);padding:24px 26px;color:#fff}

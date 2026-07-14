@@ -6,7 +6,9 @@ SQLite-backed congrats store — separate from Fabric.
 import sqlite3
 from pathlib import Path
 
-_DB_PATH = Path(__file__).parent.parent / "nova_local.db"
+from core.config import settings
+
+_DB_PATH = Path(settings.nova_local_db_path)
 
 
 def _get_conn() -> sqlite3.Connection:

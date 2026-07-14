@@ -71,8 +71,17 @@ def _swr(cache_key: str, compute_fn, fallback):
 # reports) — see _search_recursive_org. This is a profile-level rule keyed off the
 # EFFECTIVE user (so impersonating an exec shows the exec experience, and
 # impersonating a normal manager shows the recursive one).
-# 5575 = Pradeep Menon; 16467/16465/16470 = Niva Shah / Eric Verdes / Suhani Mehra.
-EXEC_USER_IDS: set[int] = {5575, 16467, 16465, 16470}
+# Sourced from .env (EXEC_USER_IDS) so no privileged IDs are hardcoded in
+# scanned source; same values, just loaded from config.
+EXEC_USER_IDS: set[int] = set(settings.exec_user_ids)
+
+
+def _safe_log(value) -> str:
+    """Neutralize user-supplied text before it goes into a log line: strip
+    CR/LF (prevents log forging / CWE-117) and cap length. Display/search
+    behavior is unaffected — this is only for what gets logged."""
+    s = str(value).replace("\r", " ").replace("\n", " ")
+    return s[:100]
 
 
 def _is_exec_manager(user: CurrentUser) -> bool:
@@ -873,15 +882,19 @@ def _compute_manager_team_snapshot() -> list:
         n = len(uids_in_team)
         avg_skill = round(sum(uid_skill.get(uid, 0.0) for uid in uids_in_team) / n, 1)
         shrunk_skill = round((n * avg_skill + K * company_avg) / (n + K), 1)
+        office = ""
         try:
             prof = get_employee_profile(None, manager_id)
             name = prof[0]["name"] if prof and prof[0].get("name") else f"Manager {manager_id}"
+            raw_office = prof[0].get("office_name") if prof else None
+            office = str(raw_office).strip().title() if raw_office else ""
         except Exception as exc:
             logger.warning("top_teams_radar: profile lookup failed for manager_id=%s: %s", manager_id, exc)
             name = f"Manager {manager_id}"
         result.append({
             "manager_id":        manager_id,        # kept so the radar-overlay helper can re-fetch members
             "name":              name,
+            "office":            office,          # manager's office location (title-cased, "" if unknown)
             "headcount":         n,
             "avg_skill_pct":     shrunk_skill,   # shrunk score — what the leaderboard ranks/shows
             "raw_avg_skill_pct": avg_skill,      # unshrunk team average, kept for reference
@@ -1123,16 +1136,27 @@ _vertical_snapshot_computing = False  # guard against concurrent recomputes
 
 def _compute_proficiency_by_vertical() -> dict:
     """
-    For each business-unit industry group, the % of its employees who are
-    AI-proficient (AI axis >= ai_proficiency_min_score), ranked high→low.
+    For each AI proficiency level (Professional/Specialist/Expert/Champion),
+    the % of each business-unit industry group's employees who have reached
+    that level. Levels are CUMULATIVE ("at least"), mirroring
+    _compute_ai_proficiency_by_region.
 
     Joins the employee_role table (employee_id → vertical_name) to the latest
     active profile (employee_id → user_id), maps vertical_name → group via
     core.verticals.group_for, and reuses the same warm classify_{uid} AI-score
     path as _compute_ai_proficiency_by_region (no rescoring).
 
-    Returns {"verticals": [{name, pct, earners, total, top}]} sorted by pct desc
-    (earners = count AI-proficient). Cached 25 h under "proficiency_by_vertical".
+    Returns:
+        {
+          "groups": [<group name>, ...],           # all groups, stable order
+          "group_totals": {group: n},
+          "levels": [
+            {"key","name","threshold","goal_pct","total_count","total_pct",
+             "verticals": {group: {"count","total","pct_of_company","pct_of_group"}}},
+            ...
+          ],
+        }
+    Cached 25 h under "proficiency_by_vertical". Runs at startup/nightly.
     """
     global _vertical_snapshot_computing
     from nova_db.gpt_cache import get_cache, set_cache
@@ -1180,35 +1204,53 @@ def _compute_proficiency_by_vertical() -> dict:
     # identical path to _compute_ai_proficiency_by_region.
     uid_ai = _batch_ai_scores(all_uid_list, "proficiency_by_vertical")
 
-    threshold = settings.ai_proficiency_min_score
-    totals: dict = {}
-    proficient: dict = {}
+    total = len(all_uid_list)
+    group_totals: dict = {}
     for uid in all_uid_list:
         g = uid_group[uid]
-        totals[g] = totals.get(g, 0) + 1
-        if uid_ai.get(uid, 0.0) >= threshold:
-            proficient[g] = proficient.get(g, 0) + 1
+        group_totals[g] = group_totals.get(g, 0) + 1
+    groups = sorted(group_totals)
 
-    verticals = [
-        {
-            "name":    g,
-            "pct":     round(proficient.get(g, 0) / totals[g] * 100, 1) if totals[g] else 0.0,
-            "earners": proficient.get(g, 0),
-            "total":   totals[g],
-        }
-        for g in totals
-    ]
-    verticals.sort(key=lambda v: v["pct"], reverse=True)
-    if verticals:
-        verticals[0]["top"] = True
+    levels_cfg = settings.ai_proficiency_levels
+    goals_cfg = settings.ai_proficiency_level_goals
 
-    result = {"verticals": verticals}
+    levels = []
+    for key in ("professional", "specialist", "expert", "champion"):
+        threshold = levels_cfg[key]
+        per_group = {g: 0 for g in groups}
+        for uid in all_uid_list:
+            if uid_ai.get(uid, 0.0) >= threshold:
+                per_group[uid_group[uid]] += 1
+        total_count = sum(per_group.values())
+        verticals_out = {}
+        for g in groups:
+            cnt = per_group[g]
+            g_total = group_totals[g]
+            verticals_out[g] = {
+                "count":          cnt,
+                "total":          g_total,
+                "pct_of_company": round(cnt / total * 100, 1) if total else 0.0,
+                "pct_of_group":   round(cnt / g_total * 100, 1) if g_total else 0.0,
+            }
+        levels.append({
+            "key":         key,
+            "name":        key.capitalize(),
+            "threshold":   threshold,
+            "goal_pct":    goals_cfg[key],
+            "total_count": total_count,
+            "total_pct":   round(total_count / total * 100, 1) if total else 0.0,
+            "verticals":   verticals_out,
+        })
+
+    result = {
+        "groups":       groups,
+        "group_totals": group_totals,
+        "levels":       levels,
+    }
     set_cache(CACHE_KEY, result, "computed", ttl_hours=25)
     logger.info(
-        "proficiency_by_vertical: complete — %d groups, top %s %.1f%%",
-        len(verticals),
-        verticals[0]["name"] if verticals else "—",
-        verticals[0]["pct"] if verticals else 0.0,
+        "proficiency_by_vertical: complete — %d groups, professional %.1f%%",
+        len(groups), levels[0]["total_pct"] if levels else 0.0,
     )
     _vertical_snapshot_computing = False
     return result
@@ -1216,7 +1258,21 @@ def _compute_proficiency_by_vertical() -> dict:
 
 def _default_proficiency_by_vertical() -> dict:
     """Empty placeholder shown while the background job computes."""
-    return {"verticals": []}
+    from core.config import settings as _s
+    return {
+        "groups": [],
+        "group_totals": {},
+        "levels": [
+            {
+                "key": key, "name": key.capitalize(),
+                "threshold": _s.ai_proficiency_levels[key],
+                "goal_pct": _s.ai_proficiency_level_goals[key],
+                "total_count": 0, "total_pct": 0.0,
+                "verticals": {},
+            }
+            for key in ("professional", "specialist", "expert", "champion")
+        ],
+    }
 
 
 _specialization_computing = False  # guard against concurrent recomputes
@@ -1730,7 +1786,7 @@ def _fetch_overview_swr_data(manager_id: int) -> dict:
     # 5 skill verticals. Sorted best-first; empty list until the snapshot is warm.
     mgr_snap = _swr("team_leaderboard_by_manager", _compute_manager_team_snapshot, [])
     team_leaderboard = sorted(
-        [{"name": m["name"], "prof": m["avg_skill_pct"], "manager_id": m["manager_id"]} for m in mgr_snap],
+        [{"name": m["name"], "office": m.get("office", ""), "prof": m["avg_skill_pct"], "manager_id": m["manager_id"]} for m in mgr_snap],
         key=lambda x: x["prof"], reverse=True,
     )
 
@@ -1870,8 +1926,8 @@ def _build_people_list(manager_id: int, filter_val: str) -> list:
     from services.skill_service import get_team_skill_scores
     from nova_db.gpt_cache import get_cache, set_cache
 
-    # v3 = payload now also carries active_days_total (for the scatter plot).
-    _cache_key = f"people_list_v3_{manager_id}_{filter_val}"
+    # v4 = payload now also carries designation_title (from employee_role).
+    _cache_key = f"people_list_v4_{manager_id}_{filter_val}"
     _cached = get_cache(_cache_key)
     if _cached:
         return _cached["result"]
@@ -1945,6 +2001,32 @@ def _build_people_list(manager_id: int, filter_val: str) -> list:
     except Exception as exc:
         logger.warning("_build_people_list: active-days query failed: %s", exc)
 
+    # Designation title from employee_role (joined by normalized employee_id) —
+    # the human-readable job title shown under each name in Individual Progress.
+    uid_designation_title: dict = {}
+    try:
+        emp_id_to_uid = {
+            str(r["employee_id"]).strip().upper(): r["user_id"]
+            for r in reports
+            if r.get("employee_id")
+        }
+        if emp_id_to_uid:
+            role_placeholders = ",".join("?" * len(emp_id_to_uid))
+            role_rows = _query(
+                f"""
+                SELECT UPPER(TRIM(employee_id)) AS emp_id, designation_title
+                FROM   employee_role
+                WHERE  UPPER(TRIM(employee_id)) IN ({role_placeholders})
+                """,
+                tuple(emp_id_to_uid.keys()),
+            )
+            for r in role_rows:
+                uid = emp_id_to_uid.get(r["emp_id"])
+                if uid is not None and r["designation_title"]:
+                    uid_designation_title[uid] = str(r["designation_title"]).strip()
+    except Exception as exc:
+        logger.warning("_build_people_list: designation_title query failed: %s", exc)
+
     try:
         team_norm = get_team_skill_scores(uids)
     except Exception as exc:
@@ -1995,6 +2077,7 @@ def _build_people_list(manager_id: int, filter_val: str) -> list:
             "name":                 r["name"],
             "department":           r["department"] or "Unknown",
             "designation":          r.get("designation", ""),
+            "designation_title":    uid_designation_title.get(uid) or "",
             "tier":                 emp_tier,
             "credits_this_quarter": round(emp_credits, 1),
             "streak_days":          int(uid_streaks.get(uid, 0)),
@@ -2135,7 +2218,7 @@ async def manager_people_search(
             uids     = [r["user_id"] for r in rows]
             enriched = await _run(_enrich_search_results, uids, rows)
         except Exception as exc:
-            logger.warning("Dev search failed q=%s: %s", q, exc)
+            logger.warning("Dev search failed q=%s: %s", _safe_log(q), exc)
             return {"employees": [], "search_scope": "error"}
         return {"employees": enriched, "search_scope": "company"}
 
@@ -2158,7 +2241,7 @@ async def manager_people_search(
         enriched = await _run(_enrich_search_results, uids, rows)
 
     except Exception as exc:
-        logger.warning("Search failed uid=%s q=%s: %s", eff_uid, q, exc)
+        logger.warning("Search failed uid=%s q=%s: %s", eff_uid, _safe_log(q), exc)
         return {"employees": [], "search_scope": "error"}
 
     return {"employees": enriched, "search_scope": scope_out}

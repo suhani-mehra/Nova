@@ -2,7 +2,9 @@ import sqlite3, json, logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-_DB_PATH = Path(__file__).parent.parent / "nova_local.db"
+from core.config import settings
+
+_DB_PATH = Path(settings.nova_local_db_path)
 logger = logging.getLogger(__name__)
 
 def _conn():

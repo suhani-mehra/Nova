@@ -234,8 +234,7 @@ def _invalidate_trend_cache() -> None:
     delete) — kept exactly as-is, not swapped, as part of this refactor."""
     try:
         import sqlite3 as _sqlite3
-        from pathlib import Path as _Path
-        _db = _Path(__file__).parent.parent / "nova_local.db"
+        _db = settings.nova_local_db_path
         with _sqlite3.connect(str(_db)) as _c:
             _c.execute("DELETE FROM gpt_cache WHERE cache_key='ai_proficiency_trend'")
             _c.commit()
@@ -246,6 +245,19 @@ def _invalidate_trend_cache() -> None:
 
 def score_all_courses() -> None:
     init_course_scores_table()
+
+    # Production backstop: when scoring is disabled (NOVA_COURSE_SCORING_ENABLED=
+    # false), never call GPT. This guarantees a missing/empty nova_local.db can
+    # never silently trigger the ~8h full-catalogue rescore in production — the
+    # app just serves whatever scores are already seeded in the DB.
+    if not settings.nova_course_scoring_enabled:
+        logger.warning(
+            "score_all_courses: scoring DISABLED (NOVA_COURSE_SCORING_ENABLED=false) — "
+            "skipping; %d courses already scored in nova_local.db",
+            get_scored_count(),
+        )
+        return
+
     logger.info("score_all_courses: starting catalogue scoring job")
 
     course_rows, cert_rows, lc_rows = _fetch_catalogue_rows()

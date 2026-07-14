@@ -6,7 +6,7 @@ const tierByKey = k => NOVA.TIERS.find(t=>t.key===k);
 // Region labels/colors for the Overview "Teams" quadrant tab legend — constant,
 // doesn't depend on props/state, so it's hoisted to module scope.
 const REGION_LABELS={asia:'Asia', na:'North America', eu:'Europe'};
-const REGION_COLS={asia:'#FF4398', na:'#2ACCFF', eu:'#A634FF'};
+const REGION_COLS={asia:'#FF6A2C', na:'#2ACCFF', eu:'#A634FF'};
 
 /* Overview "Trend" tab: AI-proficiency line chart + legend. */
 function buildTrendView(overview){
@@ -57,11 +57,57 @@ function StreakPill({days}){
   return h('span',{className:'streak-pill'}, '🔥', days);
 }
 
-/* ---------- Proficiency by Vertical (ranked bars, STATIC placeholder) ---------- */
+/* ---------- Proficiency by Vertical (stacked level bands per vertical) ---------- */
 /* TODO: replace with a real API once a business-vertical taxonomy exists. */
-function VerticalBars({data}){
+// Proficiency levels + their band colors — the single source of colors for both
+// the stacked bars and the legend below them. Colors are one purplish-blue
+// (indigo) ramp getting DARKER as proficiency rises, so Champion is the darkest.
+const VERT_LEVELS=[
+  {key:'professional', name:'Professional', color:'#AEB4F0'},
+  {key:'specialist',   name:'Specialist',   color:'#7B82E4'},
+  {key:'expert',       name:'Expert',       color:'#4B49BE'},
+  {key:'champion',     name:'Champion',     color:'#282473'},
+];
+
+// Converts the cumulative {groups, levels} proficiency-by-vertical payload into
+// per-vertical stacks of EXCLUSIVE level bands — each employee counted once at
+// their highest level reached — so a stacked bar never double-counts a Champion
+// as also an Expert/Specialist/Professional. Returns
+// [{name, total, proficientPct, proficientCount,
+//   segments:[{key,name,color,threshold,count,pctOfGroup}]}]
+// sorted by % proficient (>= Professional) descending. [] if payload missing.
+function verticalStacks(pbv){
+  if(!pbv || !pbv.groups || !pbv.levels) return [];
+  const byKey={};
+  pbv.levels.forEach(l=>{ byKey[l.key]=l; });
+  const cumFor=(g,k)=>(byKey[k] && byKey[k].verticals && byKey[k].verticals[g]) || {count:0,total:0,pct_of_group:0};
+  return pbv.groups.map(g=>{
+    const base = cumFor(g, VERT_LEVELS[0].key);           // Professional = cumulative total proficient
+    const total = base.total || 0;
+    const proficientPct = base.pct_of_group || 0;
+    const proficientCount = base.count || 0;
+    const segments = VERT_LEVELS.map((lvl,i)=>{
+      const cum = cumFor(g, lvl.key).count || 0;
+      const higher = i+1 < VERT_LEVELS.length ? (cumFor(g, VERT_LEVELS[i+1].key).count || 0) : 0;
+      const count = Math.max(0, cum - higher);            // exclusive band
+      const lvObj = byKey[lvl.key] || {};
+      return {key:lvl.key, name:lvl.name, color:lvl.color,
+              threshold: (lvObj.threshold!=null ? lvObj.threshold : null), count,
+              pctOfGroup: total ? Math.round(count/total*1000)/10 : 0};
+    });
+    return {name:g, total, proficientPct, proficientCount, segments};
+  }).sort((a,b)=>b.proficientPct-a.proficientPct);
+}
+
+function VerticalBars({data, mode}){
   const [hover,setHover]=useStateM(null);
   const plotH=230, labelH=40;   // fixed plot + label areas → bars share a baseline, titles align
+  const breakdown = mode==='levels';
+  // Levels (with their thresholds) for the legend/explanation. All verticals
+  // share the same thresholds, so read them off the first vertical's segments;
+  // fall back to VERT_LEVELS (no thresholds) when there's no data yet.
+  const levels = data.length ? data[0].segments : VERT_LEVELS.map(l=>({...l, threshold:null}));
+  const profThreshold = (levels[0] && levels[0].threshold!=null) ? levels[0].threshold : 30;
   return h('div',{style:{position:'relative',width:'100%'}},
     // baseline the bars rest on
     h('div',{style:{position:'absolute',left:0,right:0,top:plotH,height:2,background:'var(--chart-grid)',borderRadius:2}}),
@@ -72,20 +118,44 @@ function VerticalBars({data}){
           style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',alignItems:'center',cursor:'pointer'}},
           // plot area: fixed height, bar bottom-anchored so every bar rests on the same baseline
           h('div',{style:{height:plotH,width:'100%',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'flex-end'}},
-            h('div',{style:{fontSize:14,fontWeight:800,color:v.top?'#FF4398':'var(--ink)',marginBottom:6}}, v.pct+'%'),
-            h('div',{style:{width:'100%',maxWidth:46,height:(v.pct/100)*(plotH-28),borderRadius:'7px 7px 0 0',
-              background:v.top?'linear-gradient(180deg,#FF4398,#C21178)':'linear-gradient(180deg,#B266FF,#7d1fd0)',
-              filter:active?'brightness(1.08)':'none',transition:'filter .15s'}})),
+            h('div',{style:{fontSize:14,fontWeight:800,color:'var(--ink)',marginBottom:6}}, v.proficientPct+'%'),
+            breakdown
+              // exclusive level bands stacked: Professional at the bottom, Champion on top
+              ? h('div',{style:{width:'100%',maxWidth:46,height:(v.proficientPct/100)*(plotH-28),
+                  display:'flex',flexDirection:'column-reverse',borderRadius:'7px 7px 0 0',overflow:'hidden',
+                  filter:active?'brightness(1.08)':'none',transition:'filter .15s'}},
+                  v.segments.map(s=>s.pctOfGroup>0 ? h('div',{key:s.key, style:{flex:s.pctOfGroup, background:s.color}}) : null))
+              // overall: a single bar = % of the vertical that is AI-proficient
+              : h('div',{style:{width:'100%',maxWidth:46,height:(v.proficientPct/100)*(plotH-28),borderRadius:'7px 7px 0 0',
+                  background:'linear-gradient(180deg,#7B82E4,#4038A8)',
+                  filter:active?'brightness(1.08)':'none',transition:'filter .15s'}})),
           // label area: fixed height, top-aligned so all titles start on the same line
           h('div',{style:{height:labelH,marginTop:12,display:'flex',flexDirection:'column',alignItems:'center'}},
             h('div',{style:{fontSize:12,fontWeight:700,color:'var(--ink-soft)',textAlign:'center',lineHeight:1.2}}, v.name)));
       })),
-    hover!==null && h('div',{className:'chart-tip',style:_tipStyle((hover+0.5)/data.length, 0)},
-      h('div',{className:'t1'}, data[hover].name+' · '+data[hover].pct+'% proficient'),
-      h('div',{style:{fontSize:11,color:'#b7b9cc',fontWeight:600}},
-        (data[hover].earners!=null && data[hover].total!=null)
-          ? _fmtNum(data[hover].earners)+' of '+_fmtNum(data[hover].total)+' proficient'
-          : _fmtNum(data[hover].earners)+' earners'))
+    // legend + explanation of how each level is determined
+    breakdown
+      ? h('div',{className:'chart-legend', style:{justifyContent:'center',marginTop:14,flexWrap:'wrap',gap:'6px 14px'}},
+          levels.map((l,i)=>{
+            const next=levels[i+1];
+            const range = l.threshold==null ? ''
+              : (next && next.threshold!=null ? ' (score '+l.threshold+'–'+(next.threshold-1)+')'
+                                              : ' (score '+l.threshold+'+)');
+            return h('div',{className:'it', key:l.key},
+              h('span',{style:{width:12,height:12,borderRadius:3,background:l.color,display:'inline-block'}}),
+              l.name + range);
+          }))
+      : h('div',{style:{fontSize:11,color:'var(--muted)',textAlign:'center',marginTop:14,lineHeight:1.5}},
+          'Proficient = AI proficiency score ≥ '+profThreshold+' (Professional). Switch to “By level” to break each vertical into proficiency tiers.'),
+    hover!==null && (breakdown
+      ? h('div',{className:'chart-tip',style:_tipStyle((hover+0.5)/data.length, 0)},
+          h('div',{className:'t1'}, data[hover].name+' · '+data[hover].proficientPct+'% proficient'),
+          data[hover].segments.slice().reverse().map(s=>h('div',{key:s.key, style:{fontSize:11,color:'#b7b9cc',fontWeight:600}},
+            s.name+': '+_fmtNum(s.count)+' ('+s.pctOfGroup+'%)')))
+      : h('div',{className:'chart-tip',style:_tipStyle((hover+0.5)/data.length, 0)},
+          h('div',{className:'t1'}, data[hover].name+' · '+data[hover].proficientPct+'% proficient'),
+          h('div',{style:{fontSize:11,color:'#b7b9cc',fontWeight:600}},
+            _fmtNum(data[hover].proficientCount)+' of '+_fmtNum(data[hover].total)+' proficient')))
   );
 }
 
@@ -219,6 +289,7 @@ function TeamLeaderboard({rows, highlightIds, onHoverRow, scrollToId}){
             h('div',{style:{width:34,fontSize:13,fontWeight:800,color:'var(--muted)'}}, '#'+t.rank),
             h('div',{style:{flex:1,minWidth:0}},
               h('div',{style:{fontWeight:800,fontSize:14,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}, t.name),
+              t.office && h('div',{style:{fontSize:11,fontWeight:600,color:'var(--muted)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',marginTop:2}}, t.office),
               h('div',{className:'bar-wide',style:{marginTop:6}}, h('i',{style:{width:t.prof+'%',background:'linear-gradient(90deg,#2ACCFF,#A634FF)'}}))),
             h('div',{style:{fontWeight:800,fontSize:15,width:44,textAlign:'right'}}, t.prof+'%'))))
   );
@@ -230,6 +301,7 @@ function MgrOverview(){
   const overview=mgrData && mgrData.overview;
   const staticData=(mgrData && mgrData.static) || {};
   const [chartTab,setChartTab]=useStateM('trend');   // 'trend' (line) | 'region' (bars) | 'teams' (quadrant)
+  const [vertView,setVertView]=useStateM('overall');  // proficiency-by-vertical: 'overall' | 'levels'
   const [hlManagers,setHlManagers]=useStateM(null);  // transient hover highlight (quadrant ↔ leaderboard)
   const [selManager,setSelManager]=useStateM(null);  // clicked team — persists + scrolls leaderboard
 
@@ -276,9 +348,16 @@ function MgrOverview(){
             chartTab==='trend' ? trendView : chartTab==='region' ? regionView : quadrantView)
         ),
         h('div',{className:'card', style:{flex:1,display:'flex',flexDirection:'column'}},
-          h('div',{className:'card-title'},'Proficiency by Vertical'),
-          h('div',{className:'card-sub', style:{marginBottom:14}},'% AI-proficient within each business vertical, ranked.'),
-          h('div',{style:{flex:1,display:'flex',alignItems:'flex-end'}}, h(VerticalBars,{data:(overview && overview.proficiencyByVertical) || staticData.verticals || []})))
+          h('div',{className:'card-head-row', style:{marginBottom:14}},
+            h('div',null,
+              h('div',{className:'card-title'},'Proficiency by Vertical'),
+              h('div',{className:'card-sub'}, vertView==='levels'
+                ? 'Each vertical split into proficiency tiers, ranked by % proficient.'
+                : '% of each vertical that is AI-proficient, ranked.')),
+            h('div',{className:'seg'},
+              h('button',{className:vertView==='overall'?'on':'', onClick:()=>setVertView('overall')},'Overall'),
+              h('button',{className:vertView==='levels'?'on':'', onClick:()=>setVertView('levels')},'By level'))),
+          h('div',{style:{flex:1,display:'flex',alignItems:'flex-end'}}, h(VerticalBars,{data:verticalStacks(overview && overview.proficiencyByVertical), mode:vertView})))
       ),
 
       // ── right rail ──
@@ -404,23 +483,25 @@ function MgrYourTeam(){
               onClick:()=>{ setCompareTeam(t); setComparePicker(false); }},
               h('span',{style:{fontWeight:800,flex:1,textAlign:'left'}}, t.name),
               h('span',{style:{color:'var(--muted)',fontWeight:700}}, t.avgSkill+'%')))))),
-      h('div',{className:'card mgr-team-badges', style:{display:'flex',flexDirection:'column'}},
-        h('div',{className:'card-title', style:{marginBottom:6}},'Badges by tier'),
-        h('div',{className:'card-sub', style:{marginBottom:16}},'Every badge your team has earned.'),
-        h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center'}},
-          h(DonutChart,{
-            segments:['platinum','diamond','gold','silver','bronze'].map(k=>({
-              name:(tierByKey(k)||{}).name||k, color:(tierByKey(k)||{}).color||'#9aa2b1', value:badges.byTier[k]||0})),
-            centerValue:badges.total, centerLabel:'badges', size:180}))),
+      // middle column — Team Landscape scatter
+      h('div',{className:'card mgr-team-scatter', style:{display:'flex',flexDirection:'column'}},
+        h('div',{className:'card-title'},'Team Landscape'),
+        h('div',{className:'card-sub', style:{marginBottom:8}},'Each dot is a teammate — active days vs. AI proficiency.'),
+        h('div',{style:{flex:1,display:'flex',alignItems:'center'}},
+          h(ScatterChart,{points:scatterPoints, selectedId, onSelect:onSelectPerson, compact:true}))),
+      // right rail — active learners + Badges by tier
       h('div',{className:'mgr-team-rail'},
         h('div',{className:'hero-card hero-purple hero-mini'},
           h('div',{className:'hero-lab'}, Icons.users({size:15,color:'#fff'}), 'Active learners this week'),
           h('div',{className:'hero-num hero-num-sm'}, _fmtNum(active.count))),
-        h('div',{className:'card mgr-team-scatter', style:{flex:1,display:'flex',flexDirection:'column'}},
-          h('div',{className:'card-title'},'Team Landscape'),
-          h('div',{className:'card-sub', style:{marginBottom:8}},'Each dot is a teammate — active days vs. AI proficiency.'),
-          h('div',{style:{flex:1,display:'flex',alignItems:'center'}},
-            h(ScatterChart,{points:scatterPoints, selectedId, onSelect:onSelectPerson, compact:true}))))
+        h('div',{className:'card mgr-team-badges', style:{flex:1,display:'flex',flexDirection:'column'}},
+          h('div',{className:'card-title', style:{marginBottom:6}},'Badges by tier'),
+          h('div',{className:'card-sub', style:{marginBottom:16}},'Every badge your team has earned.'),
+          h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center'}},
+            h(DonutChart,{
+              segments:['platinum','diamond','gold','silver','bronze'].map(k=>({
+                name:(tierByKey(k)||{}).name||k, color:(tierByKey(k)||{}).color||'#9aa2b1', value:badges.byTier[k]||0})),
+              centerValue:badges.total, centerLabel:'badges', size:180}))))
     ),
 
     // people table
@@ -475,7 +556,7 @@ function MgrYourTeam(){
                 h('span',null,p.name), h(StreakPill,{days:streak})),
               h('div',{className:'rl'},isSearch
                 ? (p.department||'')+(p.designation?(' · '+p.designation):'')
-                : `${p.role||p.department||''}`))),
+                : (p.designationTitle || p.role || p.department || '')))),
           h('div',null, t ? h('span',{className:'tier-pill'},
             h(Hex,{color:t.color, glyph:tierHexInner(tierKey), active:false, size:24}),
             h('span',{style:{color:t.color}}, p.tier==='—'?'—':t.name))

@@ -1,0 +1,11 @@
+# Paths excluded from the Veracode upload/scan.
+# Secrets live in Key Vault; DBs and vendored deps are not first-party source;
+# dev-config.js holds local-only dev credentials that must never be scanned.
+.env
+*.db
+*.db.new
+node_modules/
+nova_frontend/dev-config.js
+__pycache__/
+*.pyc
+.DS_Store

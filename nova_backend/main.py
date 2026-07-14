@@ -65,8 +65,19 @@ def _init_startup_tables() -> None:
     init_cache()
     clear_expired()
     logger.info("GPT cache initialised")
-    from nova_db.course_scores import init_course_scores_table
+    from nova_db.course_scores import init_course_scores_table, get_scored_count
     init_course_scores_table()
+    # Visibility: surface the seeded course-score count at boot. A 0 here on a
+    # production deploy means nova_local.db was not seeded — catch it before the
+    # scoring job (or its disabled backstop) runs, rather than discovering a
+    # full rescore after the fact.
+    _scored = get_scored_count()
+    if _scored == 0:
+        logger.warning("course scores: 0 courses scored — nova_local.db appears unseeded (path=%s)",
+                       settings.nova_local_db_path)
+    else:
+        logger.info("course scores: %d courses already scored (path=%s)",
+                    _scored, settings.nova_local_db_path)
     from nova_db.tier_scores import init_tier_scores_table
     init_tier_scores_table()
     from nova_db.badges import init_badges_table
@@ -267,6 +278,38 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "X-Nova-Dev-User", "X-Nova-Impersonate"],
 )
 
+# Content-Security-Policy tuned to the app's actual external origins so nothing
+# breaks: unpkg (React/Babel), FontAwesome kit, Google Fonts, and the MSAL login
+# host (script/frame/connect for silent-token iframes). 'unsafe-eval' is required
+# by the in-browser Babel transform; inline React style objects are set via the
+# DOM style property and are not affected by style-src.
+_CSP = (
+    "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
+    "img-src 'self' data: https:; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' data: https://fonts.gstatic.com https://ka-f.fontawesome.com; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://kit.fontawesome.com https://ka-f.fontawesome.com; "
+    "connect-src 'self' https://login.microsoftonline.com https://login.windows.net https://ka-f.fontawesome.com; "
+    "frame-src https://login.microsoftonline.com"
+)
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Strict-Transport-Security": "max-age=63072000; includeSubDomains",
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+    "Content-Security-Policy": _CSP,
+}
+
+
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    """Attach standard security headers to every response (defense in depth)."""
+    response = await call_next(request)
+    for key, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    return response
+
 
 app.include_router(employee.router, prefix="/api")
 app.include_router(manager.router, prefix="/api")
@@ -293,8 +336,11 @@ async def admin_sync(user: CurrentUser = Depends(get_current_user)):
     """
     Manually re-sync the local warehouse from the Classmate API.
     Runs in a worker thread (~1-2 min); readers keep the old snapshot until
-    the atomic file swap at the end.
+    the atomic file swap at the end. Restricted to exec managers — this is a
+    heavy, ops-only operation.
     """
+    if not manager._is_exec_manager(user):
+        raise HTTPException(status_code=403, detail="Executive manager access required")
     from nova_db.warehouse_sync import sync_all
     loop = asyncio.get_event_loop()
     try:

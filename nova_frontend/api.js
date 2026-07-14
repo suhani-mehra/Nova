@@ -1,6 +1,9 @@
 /* ===================== Nova — API client ===================== */
 
-const NOVA_API_BASE = 'http://localhost:8000';
+// Same-origin by default (FastAPI serves the frontend in production). A local
+// dev server on a different port can override via window.NOVA_API_BASE
+// (set in the gitignored dev-config.js) — no hardcoded URL in shipped source.
+const NOVA_API_BASE = window.NOVA_API_BASE || '';
 
 // Executive dev mode — signed-in user and impersonation tracking.
 // Read immediately at script load so apiGet() has the header before initNova() runs.
@@ -163,7 +166,7 @@ function mapTeam(data) {
 // Region colors for the "AI proficiency by region" bar chart. Reuses the app's
 // existing palette (matches the line-chart legend gradient stops).
 const REGION_COLORS = {
-  asia:  '#FF4398',
+  asia:  '#FF6A2C',
   na:    '#2ACCFF',
   eu:    '#A634FF',
 };
@@ -210,6 +213,7 @@ function _mapPersonRow(e) {
     team:        e.department,
     department:  e.department,
     designation: e.designation || '',
+    designationTitle: e.designation_title || '',
     tier:        e.tier,
     prof:        Math.round(e.ai_proficiency),
     streak:      e.streak_days || 0,
@@ -236,7 +240,7 @@ function mapOverview(data) {
     },
     proficiencyByRegion: mapProficiencyByRegion(data.proficiency_by_region),
     // % AI-proficient per industry group (real data from employee_role join).
-    proficiencyByVertical: (data.proficiency_by_vertical && data.proficiency_by_vertical.verticals) || null,
+    proficiencyByVertical: data.proficiency_by_vertical || null,
     // Share of AI-proficient people across role groups A–F (stacked bar, sums to 100%).
     specialization: (data.specialization_landscape && data.specialization_landscape.tracks) || null,
     // Active-learners-this-week hero card (the only surviving KPI).
@@ -248,6 +252,7 @@ function mapOverview(data) {
     // Per-manager team skill average (name + %), sorted best-first by backend.
     teamLeaderboard: (data.team_leaderboard || []).map(t => ({
       name: t.name,
+      office: t.office || '',
       prof: Math.round(t.prof),
       manager_id: t.manager_id,
     })),

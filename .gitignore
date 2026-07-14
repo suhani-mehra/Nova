@@ -4,9 +4,18 @@ __pycache__/
 .DS_Store
 .claude/settings.local.json
 
+# Vendored frontend dependencies — install locally, never commit/scan
+node_modules/
+
+# Local-only dev sign-in config (dev credentials/IDs live here, not in source)
+nova_frontend/dev-config.js
+
 # Local SQLite databases + sync staging files (derived, never commit)
 *.db
 *.db.new
+*-journal
+*-wal
+*-shm
 nova.db
 nova_backend/nova_local.db
 nova_backend/nova_warehouse.db

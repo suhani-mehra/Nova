@@ -171,6 +171,8 @@ function SkillGrowthCard({skills, compareUser, comparePicker, teammates, onToggl
       )
     ),
     h('div',{className:'delta'}, h('b',null,`+${skills.delta}%`),' ', h('span',null,'vs last month')),
+    h('div',{style:{marginTop:6}},
+      h('a',{className:'link',href:'https://learning.orioninc.com/OVSP/Dashboard/SelfStudy/MySelfStudy',target:'_blank',rel:'noopener noreferrer',style:{textDecoration:'none'}},'Log self-study hours ', Icons.arrow({size:18}))),
     h('div',{className:'compare-wrap'},
       h('button',{className:'btn-compare',onClick:onTogglePicker},
         Icons.users({size:14}),
@@ -230,10 +232,22 @@ function AccomplishmentsBox({count, congratsReceived, onOpen}){
   );
 }
 
-/* Team Accomplishments popup — a sibling of the emp-grid's columns (fixed-
-   position backdrop, so its DOM nesting depth doesn't affect layout). */
+/* Team Accomplishments popup. Rendered through a portal to document.body so the
+   fixed-position backdrop escapes any transformed/animated ancestor (.page has a
+   transform-based entrance animation) — otherwise its containing block would be
+   that ancestor and only part of the page would blur/freeze. */
 function AccomplishmentsModal({open, accomplishments, onClose, onSendCongrats}){
-  return open && h('div',{className:'acc-modal-backdrop', onClick:onClose},
+  // Lock background page scroll while the popup is open; only the modal list
+  // (which has its own overflow-y:auto) scrolls. Restored on close/unmount.
+  React.useEffect(()=>{
+    if(!open) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return ()=>{ document.body.style.overflow = prev; };
+  }, [open]);
+  if(!open) return null;
+  return ReactDOM.createPortal(
+    h('div',{className:'acc-modal-backdrop', onClick:onClose},
     h('div',{className:'acc-modal', onClick:(e)=>e.stopPropagation()},
       h('div',{className:'acc-modal-head'},
         h('div',null,
@@ -252,7 +266,7 @@ function AccomplishmentsModal({open, accomplishments, onClose, onSendCongrats}){
           h('div',{className:'time'},a.time),
           h(CongratsButton,{onSend:()=>onSendCongrats(a)}))))
     )
-  );
+  ), document.body);
 }
 
 /* ---------------- MY LEARNING (consolidated employee view) ---------------- */

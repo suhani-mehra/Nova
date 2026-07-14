@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from core.auth import CurrentUser, get_current_user
+from core.config import settings
 from core.database import query
 from core.queries import get_direct_reports
 from nova_db.badges import get_user_badges
@@ -32,7 +33,7 @@ _executor = ThreadPoolExecutor(max_workers=8)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_SQLITE_DB = Path(__file__).parent.parent / "nova_local.db"
+_SQLITE_DB = Path(settings.nova_local_db_path)
 
 
 async def _run(fn, *args):

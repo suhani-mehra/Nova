@@ -7,8 +7,14 @@ Usage anywhere in the app:
 """
 
 from functools import lru_cache
+from pathlib import Path
 from typing import List
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# nova_backend/ — used to resolve the default local-DB location so the default
+# matches the historical hardcoded path exactly.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
@@ -61,11 +67,46 @@ class Settings(BaseSettings):
     # Relative paths resolve against nova_backend/ (the uvicorn cwd).
     warehouse_db_path: str = "nova_warehouse.db"
 
+    # ── App-local SQLite DB (gpt_cache, course_vertical_scores, tiers, badges,
+    # congrats, user_settings). Holds the persistent GPT-scored course catalogue.
+    # Point this at persistent, writable storage in prod (e.g. Azure App Service
+    # /home) so a code deploy never wipes the scored courses. Default reproduces
+    # the historical nova_backend/nova_local.db location.
+    nova_local_db_path: str = str(_BACKEND_DIR / "nova_local.db")
+
+    # Backstop against an accidental full catalogue re-score (the ~8h GPT job).
+    # Set NOVA_COURSE_SCORING_ENABLED=false in production once nova_local.db is
+    # seeded — score_all_courses then never calls GPT, so a missing/empty DB can
+    # never silently trigger a full rescore. New courses stay unscored until this
+    # is re-enabled for a maintenance run.
+    nova_course_scoring_enabled: bool = True
+
+    @field_validator("nova_local_db_path")
+    @classmethod
+    def _local_db_default(cls, v: str) -> str:
+        # An empty/whitespace env value falls back to the historical location
+        # rather than resolving to the current directory.
+        return v.strip() if v and v.strip() else str(_BACKEND_DIR / "nova_local.db")
+
+    @field_validator("warehouse_db_path")
+    @classmethod
+    def _warehouse_db_default(cls, v: str) -> str:
+        return v.strip() if v and v.strip() else "nova_warehouse.db"
+
     # ── Nova App ──────────────────────────────────────────────────────────────
     nova_env: str = "development"
     nova_secret_key: str
     nova_cors_origins: List[str] = ["http://localhost:5500"]
     nova_dev_bypass: bool = False  # set NOVA_DEV_BYPASS=true in .env to skip JWT auth
+
+    # ── Authorization allowlists (sourced from .env, not hardcoded in source) ──
+    # exec_user_ids: may view the company-wide Overview / run exec people search.
+    # exec_dev_user_ids: may use the dev impersonation ("view as") path.
+    # dev_fallback_*: identity used only in dev-bypass when no header is supplied.
+    exec_user_ids: List[int] = []
+    exec_dev_user_ids: List[int] = []
+    dev_fallback_user_id: int = 0
+    dev_fallback_email: str = ""
 
     @property
     def is_dev(self) -> bool:

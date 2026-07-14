@@ -14,7 +14,9 @@ function SignInPage({ onSignIn, onDevSignIn, contactHref = "#" }) {
 
   const handleDevSubmit = () => {
     const id = parseInt(devId, 10);
-    if (!NOVA.DEV_USER_IDS.has(id) || devPass !== 'nova_v1') {
+    // Dev password comes from the local-only dev-config.js global; when it is
+    // undefined (production, where that file is not shipped) dev sign-in is inert.
+    if (!window.NOVA_DEV_PASSWORD || !NOVA.DEV_USER_IDS.has(id) || devPass !== window.NOVA_DEV_PASSWORD) {
       setDevError('Invalid credentials');
       return;
     }
