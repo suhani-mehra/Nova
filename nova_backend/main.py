@@ -20,7 +20,7 @@ from core.auth import CurrentUser, get_current_user
 from core.config import settings
 from core.queries import get_employee_profile
 from nova_db.congrats import init_db as init_congrats_db
-from routers import employee, manager, congrats, auth
+from routers import employee, manager, congrats, auth, admin
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -84,6 +84,8 @@ def _init_startup_tables() -> None:
     init_badges_table()
     from nova_db.user_settings import init_user_settings_table
     init_user_settings_table()
+    from nova_db.admin_overrides import init_admin_overrides_tables
+    init_admin_overrides_tables()
 
 
 def _schedule_prewarm_jobs(loop) -> None:
@@ -275,7 +277,7 @@ app.add_middleware(
     allow_origins=settings.nova_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization", "X-Nova-Dev-User", "X-Nova-Impersonate"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # Content-Security-Policy tuned to the app's actual external origins so nothing
@@ -315,6 +317,7 @@ app.include_router(employee.router, prefix="/api")
 app.include_router(manager.router, prefix="/api")
 app.include_router(congrats.router, prefix="/api")
 app.include_router(auth.router,     prefix="/api")
+app.include_router(admin.router,    prefix="/api")
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -351,10 +354,10 @@ async def admin_sync(user: CurrentUser = Depends(get_current_user)):
     return {"ok": True, "tables": counts}
 
 
-def _build_me_response(user_id, name, email, role, is_exec_manager, color_mode,
+def _build_me_response(user_id, name, email, role, is_exec_manager, is_admin, color_mode,
                         department_code, designation_code, employee_id, manager_id) -> dict:
     """Shared shape for /api/me's three response branches (no identity yet,
-    profile found, profile lookup failed/empty) — same 10 keys, different
+    profile found, profile lookup failed/empty) — same keys, different
     sources."""
     return {
         "user_id":          user_id,
@@ -362,6 +365,7 @@ def _build_me_response(user_id, name, email, role, is_exec_manager, color_mode,
         "email":            email,
         "role":             role,
         "is_exec_manager":  is_exec_manager,
+        "is_admin":         is_admin,
         "color_mode":       color_mode,
         "department_code":  department_code,
         "designation_code": designation_code,
@@ -380,12 +384,13 @@ def me(user: CurrentUser = Depends(get_current_user)):
     """
     from nova_db.user_settings import get_color_mode
     is_exec_manager = manager._is_exec_manager(user)
+    is_admin = admin._is_admin(user)
     color_mode = get_color_mode(user.classmate_user_id) if user.classmate_user_id else "light"
 
     if user.classmate_user_id is None:
         # Production path before Classmate user lookup is wired
         return _build_me_response(
-            None, user.name, user.email, user.role, is_exec_manager, color_mode,
+            None, user.name, user.email, user.role, is_exec_manager, is_admin, color_mode,
             None, None, None, None)
 
     try:
@@ -397,12 +402,12 @@ def me(user: CurrentUser = Depends(get_current_user)):
     if rows:
         p = rows[0]
         return _build_me_response(
-            p["user_id"], p["name"], p["email_id"], user.role, is_exec_manager, color_mode,
+            p["user_id"], p["name"], p["email_id"], user.role, is_exec_manager, is_admin, color_mode,
             p["department"], p["designation"], p["employee_id"], p["manager_user_id"])
 
     # Fabric unreachable or profile not found — return identity from auth layer
     return _build_me_response(
-        user.classmate_user_id, user.name, user.email, user.role, is_exec_manager, color_mode,
+        user.classmate_user_id, user.name, user.email, user.role, is_exec_manager, is_admin, color_mode,
         None, None, None, None)
 
 

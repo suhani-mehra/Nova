@@ -1,25 +1,14 @@
 /* ===================== Nova — API client ===================== */
 
-// Same-origin by default (FastAPI serves the frontend in production). A local
-// dev server on a different port can override via window.NOVA_API_BASE
-// (set in the gitignored dev-config.js) — no hardcoded URL in shipped source.
+// Same-origin by default (FastAPI serves the frontend). A local dev server on a
+// different port can override via a window.NOVA_API_BASE global — no hardcoded
+// URL in shipped source.
 const NOVA_API_BASE = window.NOVA_API_BASE || '';
-
-// Executive dev mode — signed-in user and impersonation tracking.
-// Read immediately at script load so apiGet() has the header before initNova() runs.
-let _novaDevUserId = sessionStorage.getItem('nova_dev_uid') || null;
-let _novaImpersonateId = sessionStorage.getItem('nova_impersonate_id') || null;
-
-function novaSetImpersonate(userId) {
-  _novaImpersonateId = userId ? String(userId) : null;
-}
 
 async function apiGet(path) {
   try {
     const token = (typeof novaGetToken === 'function') ? await novaGetToken() : null;
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    if (_novaDevUserId) headers['X-Nova-Dev-User'] = _novaDevUserId;
-    if (_novaImpersonateId) headers['X-Nova-Impersonate'] = _novaImpersonateId;
     const res = await fetch(NOVA_API_BASE + path, { headers });
     if (!res.ok) throw new Error(`HTTP ${res.status} for GET ${path}`);
     return await res.json();
@@ -34,8 +23,6 @@ async function apiPost(path, body) {
     const token = (typeof novaGetToken === 'function') ? await novaGetToken() : null;
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    if (_novaDevUserId) headers['X-Nova-Dev-User'] = _novaDevUserId;
-    if (_novaImpersonateId) headers['X-Nova-Impersonate'] = _novaImpersonateId;
     const res = await fetch(NOVA_API_BASE + path, {
       method: 'POST',
       headers,
@@ -329,6 +316,7 @@ function mapMe(data) {
     av:    avByRole[data.role] || avByRole.employee,
     kind:  data.role,  // passes through "employee" | "manager" | "both"
     isExecManager: !!data.is_exec_manager,
+    isAdmin: !!data.is_admin,
     colorMode: data.color_mode || 'light',
   };
 }
@@ -380,25 +368,6 @@ async function loadManagerData(isExec) {
 
 async function initNova() {
   try {
-    // Restore dev mode headers before the first API call
-    const devUid = sessionStorage.getItem('nova_dev_uid');
-    const impersonateId = sessionStorage.getItem('nova_impersonate_id');
-
-    // Always set the signed-in dev user separately from impersonation target
-    if (devUid) {
-      _novaDevUserId = devUid;
-    }
-    if (impersonateId) {
-      if (typeof novaSetImpersonate === 'function') {
-        novaSetImpersonate(impersonateId);
-      }
-    } else {
-      // Clear any stale impersonation
-      if (typeof novaSetImpersonate === 'function') {
-        novaSetImpersonate(null);
-      }
-    }
-
     const meData = await apiGet('/api/me');
     if (!meData) throw new Error('Could not fetch /api/me');
 
@@ -421,6 +390,8 @@ async function initNova() {
     window.NOVA.accounts.role = role;
     // Exec managers (company-wide Overview tab) — everyone else sees Your Team only.
     window.NOVA.accounts.isExecManager = !!meData.is_exec_manager;
+    // Admins (Admin page in the profile dropdown) — the 4 configured admins only.
+    window.NOVA.accounts.isAdmin = !!meData.is_admin;
     // Apply the account's saved color mode (authoritative over the pre-boot
     // localStorage guess) and cache it for a flash-free next load.
     window.NOVA.accounts.colorMode = meData.color_mode || 'light';
@@ -435,13 +406,11 @@ async function initNova() {
       if (dashData) window.NOVA.employee = mapDashboard(dashData);
       if (teamData)  window.NOVA.team    = mapTeam(teamData);
 
-      console.log('[Nova] Real data loaded for role:', role);
       _resolveDataReady();
 
     } else if (role === 'manager') {
       window.NOVA.accounts.employee = null;
       await loadManagerData(meData.is_exec_manager);
-      console.log('[Nova] Real data loaded for role:', role);
       _resolveDataReady();
 
     } else if (role === 'both') {
@@ -460,7 +429,6 @@ async function initNova() {
       await loadManagerData(meData.is_exec_manager);
       window.dispatchEvent(new CustomEvent('nova-manager-ready'));
 
-      console.log('[Nova] Real data loaded for role:', role);
       _resolveDataReady();
     }
   } catch (err) {

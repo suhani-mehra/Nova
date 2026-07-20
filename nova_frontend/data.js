@@ -28,15 +28,8 @@
     ],
   };
 
-  // Exec dev/sign-in IDs allowed to use the "view as" impersonation panel.
-  // Sourced from a runtime global (set only by the gitignored dev-config.js in
-  // local dev) so no privileged IDs are hardcoded in shipped source; empty in
-  // production, which makes the dev sign-in / impersonation panel inert.
-  const DEV_USER_IDS = new Set(window.NOVA_DEV_IDS || []);
-
   window.NOVA = {
     TIERS,
-    DEV_USER_IDS,
     managerStatic: MANAGER_STATIC,
     accounts: {
       employee: null,

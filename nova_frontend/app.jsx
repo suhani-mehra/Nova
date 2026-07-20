@@ -21,12 +21,13 @@ function OILogo(){
   );
 }
 
-function ProfileMenu({account, onSwitch}){
+function ProfileMenu({account, onSwitch, onOpenAdmin}){
   const [open,setOpen]=useState(false);
   const [theme,setTheme]=useState((document.documentElement.dataset.theme==='dark')?'dark':'light');
   const ref=useRef(null);
   const a = NOVA.accounts[account] || NOVA.accounts.current || {};
   const kind = account;
+  const isAdmin = !!(NOVA.accounts && NOVA.accounts.isAdmin);
 
   useEffect(()=>{
     const onDoc=e=>{ if(ref.current && !ref.current.contains(e.target)) setOpen(false); };
@@ -74,6 +75,13 @@ function ProfileMenu({account, onSwitch}){
         h('button',{className:'menu-item', onClick:()=>{onSwitch(otherKind); setOpen(false);}},
           h('span',{className:'ic'},Icons.switch({size:17})),
           otherKind === 'manager' ? 'Switch to Manager view' : 'Switch to Employee view')
+      ),
+      isAdmin && h(React.Fragment,null,
+        h('div',{className:'sep'}),
+        h('div',{className:'demo-note'},'Admin'),
+        h('button',{className:'menu-item', onClick:()=>{ if(onOpenAdmin) onOpenAdmin(); setOpen(false); }},
+          h('span',{className:'ic'},Icons.shield ? Icons.shield({size:17}) : Icons.switch({size:17})),
+          'Admin')
       )
     )
   );
@@ -97,83 +105,6 @@ function managerTabList() {
 
 function tabsForAccount(account) {
   return account === 'manager' ? managerTabList() : (TABS[account] || TABS.employee);
-}
-
-function ExecDevPanel({ myId }) {
-  const myIdNum = myId ? parseInt(myId, 10) : null;
-
-  const currentTarget = sessionStorage.getItem('nova_impersonate_id');
-  const [query, setQuery] = useState('');
-  const [results, setResults] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [open, setOpen] = useState(false);
-  const debounceRef = useRef(null);
-  const panelRef = useRef(null);
-
-  useEffect(() => {
-    const handler = e => {
-      if (panelRef.current && !panelRef.current.contains(e.target)) setOpen(false);
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  const search = (q) => {
-    setQuery(q);
-    clearTimeout(debounceRef.current);
-    if (!q.trim()) { setResults([]); setOpen(false); return; }
-    debounceRef.current = setTimeout(async () => {
-      setLoading(true);
-      const data = await apiGet('/api/manager/people/search?scope=impersonate&q=' + encodeURIComponent(q));
-      setLoading(false);
-      if (data && data.employees) {
-        setResults(data.employees.slice(0, 8));
-        setOpen(true);
-      }
-    }, 250);
-  };
-
-  const switchTo = (emp) => {
-    sessionStorage.setItem('nova_impersonate_id', String(emp.user_id));
-    setOpen(false);
-    setQuery('');
-    window.location.reload();
-  };
-
-  const clear = () => {
-    sessionStorage.removeItem('nova_impersonate_id');
-    window.location.reload();
-  };
-
-  if (!NOVA.DEV_USER_IDS.has(myIdNum)) return null;
-
-  return h('div', { className: 'exec-dev-panel' + (currentTarget ? ' active' : ''), ref: panelRef },
-    h('span', { className: 'exec-dev-label' }, '⚡'),
-    currentTarget && h('span', { className: 'exec-dev-viewing' }, `User ${currentTarget}`),
-    h('div', { className: 'exec-dev-search' },
-      h('input', {
-        type: 'text',
-        placeholder: currentTarget ? 'Switch to…' : 'Search name…',
-        value: query,
-        onChange: e => search(e.target.value),
-        onFocus: () => results.length && setOpen(true),
-      }),
-      loading && h('span', { className: 'exec-dev-spinner' }, '…'),
-      open && results.length > 0 && h('div', { className: 'exec-dev-dropdown' },
-        results.map(emp =>
-          h('div', {
-            key: emp.user_id,
-            className: 'exec-dev-result',
-            onMouseDown: () => switchTo(emp),
-          },
-            h('span', { className: 'exec-dev-result-name' }, emp.name),
-            h('span', { className: 'exec-dev-result-meta' }, emp.department || emp.designation || `#${emp.user_id}`)
-          )
-        )
-      )
-    ),
-    currentTarget && h('button', { className: 'exec-dev-clear', onClick: clear }, '✕')
-  );
 }
 
 function TopKPI({account}){
@@ -201,6 +132,7 @@ function App(){
   const initKind = (NOVA.accounts.current && NOVA.accounts.current.kind) || 'employee';
   const [account,setAccount]=useState(initKind);
   const [tab,setTab]=useState(tabsForAccount(initKind)[0].id);
+  const [adminOpen,setAdminOpen]=useState(false);
   const [t,setTweak]=useTweaks(TWEAK_DEFAULTS);
   const [,forceUpdate]=useState(0);
 
@@ -225,11 +157,13 @@ function App(){
 
   const switchAccount=(role)=>{
     if(NOVA.accounts[role]) NOVA.accounts.current = NOVA.accounts[role];
+    setAdminOpen(false);
     setAccount(role);
     setTab(tabsForAccount(role)[0].id);
   };
 
   const render=()=>{
+    if (adminOpen) return h(AdminPage, { onClose: ()=>setAdminOpen(false) });
     if (tab === 'employee') return h(MyEmployee);
     if (tab === 'overview') return h(MgrOverview);
     return h(MgrYourTeam);
@@ -243,13 +177,13 @@ function App(){
         h(OILogo)),
       h('div',{className:'tabs-wrap'},
         tabs.length > 1 && h('nav',{className:'tabs'},
-          tabs.map(t=>h('button',{key:t.id, className:'tab'+(tab===t.id?' active':''),
-            onClick:()=>setTab(t.id)}, t.label)))),
+          tabs.map(t=>h('button',{key:t.id, className:'tab'+(!adminOpen && tab===t.id?' active':''),
+            onClick:()=>{ setAdminOpen(false); setTab(t.id); }}, t.label)))),
       h('div',{className:'right'},
         h(TopKPI,{account}),
-        h(ProfileMenu,{account, onSwitch:switchAccount}))
+        h(ProfileMenu,{account, onSwitch:switchAccount, onOpenAdmin:()=>setAdminOpen(true)}))
     ),
-    h('main',{key:account+tab}, render()),
+    h('main',{key:(adminOpen?'admin':account+tab)}, render()),
     h(TweaksPanel,null,
       h(TweakSection,{label:'Accent'}),
       h(TweakColor,{label:'Gradient', value:t.accent,
@@ -260,8 +194,7 @@ function App(){
         onChange:v=>setTweak('glow',v)}),
       h(TweakRadio,{label:'Corners', value:t.corners, options:['sharp','soft','rounded'],
         onChange:v=>setTweak('corners',v)})
-    ),
-    h(ExecDevPanel, { myId: sessionStorage.getItem('nova_dev_uid') || null })
+    )
   );
 }
 
@@ -294,10 +227,6 @@ function SignInPageGate() {
       await novaSignIn();
       window.location.reload();
     },
-    onDevSignIn: (uid) => {
-      sessionStorage.setItem('nova_dev_uid', String(uid));
-      window.location.reload();
-    },
   });
 }
 
@@ -316,31 +245,24 @@ function AppRoot() {
   const [phase, setPhase] = useState('loading'); // 'loading' | 'ready' | 'error' | 'signin'
 
   useEffect(() => {
-    const msalAccount = (typeof msal !== 'undefined' && typeof novaGetAccount === 'function')
-      ? novaGetAccount() : null;
-    const devUid = sessionStorage.getItem('nova_dev_uid');
-
-    if (!msalAccount && !devUid) {
-      setPhase('signin');
-      return;
-    }
-
-    // Wait for the real data-ready signal — initNova() always resolves
-    // __novaDataReady when it finishes (success or caught error). Whenever it
-    // resolves, decide ready vs. error based on whether the data actually loaded.
-    // The timeout is only a safety net for a genuinely hung request (e.g. the
-    // backend never responds at all), so it's generous.
+    // initNova() always resolves __novaDataReady when it finishes (success or
+    // caught error). Once it settles, decide the phase:
+    //   - data loaded            → ready (covers SSO-signed-in and dev-bypass)
+    //   - no data, MSAL account  → error (signed in but backend/data failed)
+    //   - no data, no account    → signin (not authenticated; /api/me was 401)
+    // The timeout is only a safety net for a genuinely hung request, so it's
+    // generous.
     let settled = false;
-    window.__novaDataReady.then(() => {
+    const decide = () => {
       if (settled) return;
       settled = true;
-      setPhase(novaDataComplete() ? 'ready' : 'error');
-    });
-    setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      setPhase(novaDataComplete() ? 'ready' : 'error');
-    }, 120000); // 2 min hard cap
+      if (novaDataComplete()) { setPhase('ready'); return; }
+      const msalAccount = (typeof msal !== 'undefined' && typeof novaGetAccount === 'function')
+        ? novaGetAccount() : null;
+      setPhase(msalAccount ? 'error' : 'signin');
+    };
+    window.__novaDataReady.then(decide);
+    setTimeout(decide, 120000); // 2 min hard cap
   }, []);
 
   if (phase === 'loading') return h(LoadingScreen);

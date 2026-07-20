@@ -121,23 +121,37 @@ def get_all_active_employee_regions(conn: sqlite3.Connection) -> list[dict]:
 
 
 def is_manager(conn: sqlite3.Connection, user_id: int) -> bool:
-    """Return True if user_id appears as manager for at least one active employee."""
+    """Return True if user_id is the *effective* manager of at least one active
+    employee, honoring admin manager overrides (see nova_db/admin_overrides):
+    an employee reassigned TO user_id counts; a Classmate report reassigned AWAY
+    no longer counts."""
+    from nova_db.admin_overrides import get_manager_overrides
+    overrides = get_manager_overrides()
+
+    # Anyone explicitly reassigned to user_id makes them a manager.
+    if any(mgr == user_id for mgr in overrides.values()):
+        return True
+
+    # Otherwise: a Classmate report still effectively reporting to user_id.
     sql = _DEDUP_CTE + """
-        SELECT COUNT(*) AS cnt
-        FROM   latest_profiles
-        WHERE  rn      = 1
-          AND  manager = ?
+        SELECT ep.user_id
+        FROM   latest_profiles ep
+        WHERE  ep.rn      = 1
+          AND  ep.manager = ?
     """
     rows = query(sql, (user_id,))
-    return bool(rows and int(rows[0]["cnt"] or 0) > 0)
+    if not overrides:
+        return bool(rows)
+    return any(overrides.get(int(r["user_id"]), user_id) == user_id for r in rows)
 
 
-def get_direct_reports(conn: sqlite3.Connection, manager_user_id: int) -> list[dict]:
-    """
-    All active direct reports for manager_user_id.
+def _classmate_direct_reports(manager_user_id: int) -> list[dict]:
+    """Direct reports for manager_user_id straight from Classmate (cached 25h).
+    Override-unaware — get_direct_reports() layers admin overrides on top, so the
+    cache holds only the underlying Classmate data and never needs invalidation
+    when an override changes.
     Uses dedup CTE. No join to dim_classmate_user — that table has multiple rows
-    per user_id and would cause SCD fan-out duplicates.
-    """
+    per user_id and would cause SCD fan-out duplicates."""
     from nova_db.gpt_cache import get_cache, set_cache
     cache_key = f"direct_reports_{manager_user_id}"
     cached = get_cache(cache_key)
@@ -160,6 +174,60 @@ def get_direct_reports(conn: sqlite3.Connection, manager_user_id: int) -> list[d
     _title_case_fields(rows)
     set_cache(cache_key, rows, "computed", ttl_hours=25)
     return rows
+
+
+def _report_rows_for_uids(user_ids: list[int]) -> list[dict]:
+    """Report-shaped rows (user_id, employee_id, name, department, designation)
+    for an explicit set of employees — used to pull in employees reassigned to a
+    manager via an admin override, who aren't that manager's Classmate reports."""
+    if not user_ids:
+        return []
+    # Placeholder count for IN(...), not a value — each id is bound through a
+    # parameterised '?' slot below, never concatenated into the SQL text.
+    placeholders = ",".join("?" * len(user_ids))
+    sql = _DEDUP_CTE + f"""
+        SELECT
+            ep.user_id,
+            ep.employee_id,
+            LOWER(TRIM(ep.display_name))     AS name,
+            LOWER(TRIM(ep.department_code))  AS department,
+            LOWER(TRIM(ep.designation_code)) AS designation
+        FROM   latest_profiles ep
+        WHERE  ep.rn      = 1
+          AND  ep.user_id IN ({placeholders})
+        ORDER BY ep.display_name
+    """
+    rows = query(sql, tuple(user_ids))
+    return _title_case_fields(rows)
+
+
+def get_direct_reports(conn: sqlite3.Connection, manager_user_id: int) -> list[dict]:
+    """
+    All active direct reports for manager_user_id, with admin manager overrides
+    applied on top of the Classmate data (see nova_db/admin_overrides):
+      - a Classmate report reassigned elsewhere by an override is removed
+      - an employee reassigned TO this manager by an override is added
+    """
+    from nova_db.admin_overrides import get_manager_overrides
+    overrides = get_manager_overrides()
+
+    base = _classmate_direct_reports(manager_user_id)
+    if not overrides:
+        return base
+
+    # Keep Classmate reports not reassigned away by an override.
+    result = [r for r in base
+              if overrides.get(int(r["user_id"]), manager_user_id) == manager_user_id]
+
+    # Add employees explicitly reassigned to this manager (not already present).
+    present = {int(r["user_id"]) for r in result}
+    added_uids = [uid for uid, mgr in overrides.items()
+                  if mgr == manager_user_id and uid not in present]
+    if added_uids:
+        result.extend(_report_rows_for_uids(added_uids))
+        result.sort(key=lambda r: (r.get("name") or ""))
+
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════

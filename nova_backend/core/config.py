@@ -101,10 +101,11 @@ class Settings(BaseSettings):
 
     # ── Authorization allowlists (sourced from .env, not hardcoded in source) ──
     # exec_user_ids: may view the company-wide Overview / run exec people search.
-    # exec_dev_user_ids: may use the dev impersonation ("view as") path.
-    # dev_fallback_*: identity used only in dev-bypass when no header is supplied.
+    # admin_user_ids: may use the Admin page (override manager allocations and
+    #   exec status). See routers/admin.py.
+    # dev_fallback_*: identity used only in dev-bypass to load the local dev user.
     exec_user_ids: List[int] = []
-    exec_dev_user_ids: List[int] = []
+    admin_user_ids: List[int] = []
     dev_fallback_user_id: int = 0
     dev_fallback_email: str = ""
 

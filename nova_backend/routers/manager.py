@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from core.auth import CurrentUser, get_current_user
 from core.database import query as _query
@@ -68,11 +68,8 @@ def _swr(cache_key: str, compute_fn, fallback):
 
 # Exec profiles: get the company-wide Overview tab and company-wide people search.
 # Every other manager searches only their own org subtree (direct + indirect
-# reports) — see _search_recursive_org. This is a profile-level rule keyed off the
-# EFFECTIVE user (so impersonating an exec shows the exec experience, and
-# impersonating a normal manager shows the recursive one).
-# Sourced from .env (EXEC_USER_IDS) so no privileged IDs are hardcoded in
-# scanned source; same values, just loaded from config.
+# reports) — see _search_recursive_org. Sourced from .env (EXEC_USER_IDS) so no
+# privileged IDs are hardcoded in scanned source.
 EXEC_USER_IDS: set[int] = set(settings.exec_user_ids)
 
 
@@ -87,14 +84,17 @@ def _safe_log(value) -> str:
 def _is_exec_manager(user: CurrentUser) -> bool:
     """
     True only for exec-level *managers* — the audience for the company-wide
-    Overview tab. Reuses EXEC_USER_IDS (the same set that governs company-wide
-    people search) but additionally requires the user to actually be a manager
-    (have direct reports). Today this resolves to Pradeep Menon (5575) alone.
+    Overview tab. Effective exec status is an admin exec override if one exists
+    for the user (see nova_db/admin_overrides), otherwise membership in
+    EXEC_USER_IDS (.env). Either way the user must actually be a manager
+    (user.role, itself override-aware). An explicit is_exec=False override can
+    therefore revoke exec status even for someone in EXEC_USER_IDS.
     """
-    return (
-        user.classmate_user_id in EXEC_USER_IDS
-        and user.role in ("manager", "both")
-    )
+    from nova_db.admin_overrides import get_exec_overrides
+    uid = user.classmate_user_id
+    overrides = get_exec_overrides()
+    exec_flag = overrides[uid] if uid in overrides else (uid in EXEC_USER_IDS)
+    return exec_flag and user.role in ("manager", "both")
 
 
 def _get_all_active_uids() -> list[int]:
@@ -2187,42 +2187,16 @@ async def manager_your_team(
 
 @router.get("/manager/people/search")
 async def manager_people_search(
-    request: Request,
     q: str = Query("", min_length=0, max_length=100),
-    scope: str = Query("", max_length=20),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Two distinct callers hit this endpoint:
-
-    - scope="impersonate": the ⚡ dev-impersonation panel. The REAL signed-in dev
-      (X-Nova-Dev-User) is finding someone to view-as — always company-wide,
-      independent of who they're currently impersonating, so they can reach anyone.
-      Gated on the real dev identity being an exec.
-    - default: the manager page "Individual Progress" search. Keyed off the
-      EFFECTIVE profile (the impersonated user when impersonating, else the real
-      user) so impersonation faithfully shows that role's real experience — exec
-      profiles get company-wide, every other manager gets their org subtree
-      (direct + indirect reports)."""
+    """The manager page "Individual Progress" search, keyed off the signed-in
+    user's profile: exec profiles get company-wide results, every other manager
+    gets their own org subtree (direct + indirect reports)."""
     if not q or not q.strip():
         return {"employees": [], "search_scope": "none"}
     q_lower = q.strip().lower()
 
-    # ── Dev-impersonation panel: always company-wide for an exec dev ──────────
-    if scope == "impersonate":
-        dev_header = request.headers.get("X-Nova-Dev-User")
-        signed_in_uid = int(dev_header) if dev_header and dev_header.isdigit() else user.classmate_user_id
-        if signed_in_uid not in EXEC_USER_IDS:
-            raise HTTPException(status_code=403, detail="Not authorized for dev search")
-        try:
-            rows     = await _run(_search_company_wide, q_lower)
-            uids     = [r["user_id"] for r in rows]
-            enriched = await _run(_enrich_search_results, uids, rows)
-        except Exception as exc:
-            logger.warning("Dev search failed q=%s: %s", _safe_log(q), exc)
-            return {"employees": [], "search_scope": "error"}
-        return {"employees": enriched, "search_scope": "company"}
-
-    # ── Manager page: scope reflects the effective (impersonated) profile ─────
     eff_uid = user.classmate_user_id
     if eff_uid is None:
         return {"employees": [], "search_scope": "dev"}

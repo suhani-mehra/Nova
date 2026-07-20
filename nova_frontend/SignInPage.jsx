@@ -1,27 +1,10 @@
 /* ===================== Nova — Sign-in page =====================
  *
  * Props (when rendered):
- *   onSignIn    – click handler; wire to msalInstance.loginRedirect() when SSO is ready
- *   onDevSignIn – dev mode sign-in handler (uid) => void
- *   contactHref – href for the "Contact your admin" link (default "#")
+ *   onSignIn – click handler; wire to msalInstance.loginRedirect() when SSO is ready
  */
 
-function SignInPage({ onSignIn, onDevSignIn, contactHref = "#" }) {
-  const [devMode, setDevMode] = React.useState(false);
-  const [devId, setDevId] = React.useState('');
-  const [devPass, setDevPass] = React.useState('');
-  const [devError, setDevError] = React.useState('');
-
-  const handleDevSubmit = () => {
-    const id = parseInt(devId, 10);
-    // Dev password comes from the local-only dev-config.js global; when it is
-    // undefined (production, where that file is not shipped) dev sign-in is inert.
-    if (!window.NOVA_DEV_PASSWORD || !NOVA.DEV_USER_IDS.has(id) || devPass !== window.NOVA_DEV_PASSWORD) {
-      setDevError('Invalid credentials');
-      return;
-    }
-    if (onDevSignIn) onDevSignIn(id);
-  };
+function SignInPage({ onSignIn }) {
   return (
     <div className="nova-signin">
       <div className="nova-signin__card">
@@ -60,45 +43,6 @@ function SignInPage({ onSignIn, onDevSignIn, contactHref = "#" }) {
             <_ShieldIcon />
             <span>Secured by Azure AD single sign-on</span>
           </p>
-
-          {!devMode ? (
-            <button
-              type="button"
-              className="nova-signin__dev-toggle"
-              onClick={() => setDevMode(true)}
-            >
-              Dev mode
-            </button>
-          ) : (
-            <div className="nova-signin__dev-form">
-              <input
-                type="number"
-                placeholder="User ID"
-                value={devId}
-                onChange={e => setDevId(e.target.value)}
-                className="nova-signin__dev-input"
-              />
-              <input
-                type="password"
-                placeholder="Password"
-                value={devPass}
-                onChange={e => setDevPass(e.target.value)}
-                className="nova-signin__dev-input"
-              />
-              {devError && <p className="nova-signin__dev-error">{devError}</p>}
-              <div className="nova-signin__dev-actions">
-                <button type="button" className="nova-signin__dev-submit" onClick={handleDevSubmit}>Enter</button>
-                <button type="button" className="nova-signin__dev-cancel" onClick={() => { setDevMode(false); setDevError(''); }}>Cancel</button>
-              </div>
-            </div>
-          )}
-
-          <footer className="nova-signin__footer">
-            <span>Trouble signing in? </span>
-            <a className="nova-signin__link" href={contactHref}>
-              Contact your admin
-            </a>
-          </footer>
         </section>
 
       </div>
